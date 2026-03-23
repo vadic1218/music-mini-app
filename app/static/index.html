@@ -24,6 +24,7 @@
       <button class="tab" data-tab="liked">Мне понравилось</button>
       <button class="tab" data-tab="lyrics">Тексты</button>
       <button class="tab" data-tab="library">Библиотека</button>
+      <button class="tab" data-tab="player">Сейчас играет</button>
       <button class="tab" data-tab="status">Статус</button>
     </nav>
 
@@ -87,6 +88,36 @@
         <div id="library-results" class="result-grid"></div>
       </section>
 
+      <section id="tab-player" class="panel">
+        <div class="panel__head">
+          <h2>Сейчас играет</h2>
+          <p>Встроенный плеер Mini App. Можно слушать сразу или ставить треки следующими в очередь.</p>
+        </div>
+        <div class="player-screen card">
+          <div class="player-screen__cover" id="player-cover"></div>
+          <div class="player-screen__body">
+            <div class="player-screen__eyebrow">Сейчас играет</div>
+            <h3 id="player-title">Ничего не играет</h3>
+            <p id="player-artist">Выберите трек в поиске, лайках или библиотеке.</p>
+            <div class="player-progress">
+              <span id="player-current-time">0:00</span>
+              <input id="player-seek" type="range" min="0" max="100" value="0">
+              <span id="player-duration">0:00</span>
+            </div>
+            <div class="player-controls">
+              <button id="player-prev" class="ghost-button" type="button">Назад</button>
+              <button id="player-toggle" class="primary-button" type="button">Слушать</button>
+              <button id="player-next" class="ghost-button" type="button">Следующий</button>
+            </div>
+          </div>
+        </div>
+        <div class="queue-head">
+          <h3>Очередь</h3>
+          <button id="queue-clear" class="ghost-button" type="button">Очистить</button>
+        </div>
+        <div id="queue-list" class="queue-list"></div>
+      </section>
+
       <section id="tab-status" class="panel">
         <div class="panel__head">
           <h2>Статус</h2>
@@ -96,6 +127,17 @@
       </section>
     </main>
   </div>
+
+  <div id="player-dock" class="player-dock is-hidden">
+    <button id="player-dock-open" class="player-dock__meta" type="button">
+      <span id="player-dock-title">Ничего не играет</span>
+      <span id="player-dock-subtitle">Выберите трек</span>
+    </button>
+    <button id="player-dock-toggle" class="ghost-button" type="button">▶</button>
+    <button id="player-dock-next" class="ghost-button" type="button">⏭</button>
+  </div>
+
+  <audio id="audio-player" preload="none"></audio>
 
   <template id="track-card-template">
     <article class="track-card">
@@ -109,6 +151,16 @@
         <div class="track-card__meta"></div>
         <div class="track-card__actions"></div>
       </div>
+    </article>
+  </template>
+
+  <template id="queue-item-template">
+    <article class="queue-item">
+      <div class="queue-item__body">
+        <strong class="queue-item__title"></strong>
+        <span class="queue-item__artist"></span>
+      </div>
+      <button class="queue-item__remove ghost-button" type="button">Убрать</button>
     </article>
   </template>
 

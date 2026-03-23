@@ -7,6 +7,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from app.config import APP_NAME, APP_BASE_URL, DATA_DIR, DATABASE_PATH, STATIC_DIR, TELEGRAM_BOT_TOKEN, YANDEX_MUSIC_TOKEN
 from app.database import db
 from app.services.lyrics_service import get_lyrics
+from app.services.playback_service import resolve_stream_url
 from app.services.search_service import get_yandex_liked_tracks, search_tracks
 from app.services.telegram_auth import validate_init_data
 
@@ -104,6 +105,20 @@ def api_save_track():
 
     db.save_track(payload, bucket=bucket)
     return jsonify({"ok": True})
+
+
+@app.post("/api/playback-url")
+def api_playback_url():
+    track = request.get_json(silent=True) or {}
+    required_fields = ["source", "source_track_id"]
+    if any(not track.get(field) for field in required_fields):
+        return jsonify({"detail": "Недостаточно данных для воспроизведения."}), 400
+
+    stream_url = resolve_stream_url(track)
+    if not stream_url:
+        return jsonify({"detail": "Не удалось получить поток для этого трека."}), 404
+
+    return jsonify({"ok": True, "stream_url": stream_url})
 
 
 @app.post("/api/liked/sync")

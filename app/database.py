@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -49,6 +50,7 @@ class Database:
                     duration_seconds INTEGER DEFAULT 0,
                     cover_url TEXT,
                     external_url TEXT,
+                    source_meta TEXT,
                     bucket TEXT NOT NULL DEFAULT 'library',
                     is_active INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
@@ -67,6 +69,10 @@ class Database:
                 );
                 """
             )
+
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(library_tracks)").fetchall()}
+            if "source_meta" not in columns:
+                conn.execute("ALTER TABLE library_tracks ADD COLUMN source_meta TEXT")
 
     def upsert_user(self, user_payload: dict) -> None:
         if not user_payload or "id" not in user_payload:
@@ -102,10 +108,10 @@ class Database:
                 """
                 INSERT INTO library_tracks (
                     source, source_track_id, title, artists, album,
-                    duration_seconds, cover_url, external_url, bucket,
+                    duration_seconds, cover_url, external_url, source_meta, bucket,
                     is_active, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                 ON CONFLICT(source, source_track_id, bucket) DO UPDATE SET
                     title = excluded.title,
                     artists = excluded.artists,
@@ -113,6 +119,7 @@ class Database:
                     duration_seconds = excluded.duration_seconds,
                     cover_url = excluded.cover_url,
                     external_url = excluded.external_url,
+                    source_meta = excluded.source_meta,
                     is_active = 1,
                     updated_at = excluded.updated_at
                 """,
@@ -125,6 +132,7 @@ class Database:
                     int(track.get("duration_seconds") or 0),
                     track.get("cover_url"),
                     track.get("external_url"),
+                    json.dumps(track.get("source_meta") or {}, ensure_ascii=False),
                     bucket,
                     now,
                     now,
@@ -167,10 +175,10 @@ class Database:
                     """
                     INSERT INTO library_tracks (
                         source, source_track_id, title, artists, album,
-                        duration_seconds, cover_url, external_url, bucket,
+                        duration_seconds, cover_url, external_url, source_meta, bucket,
                         is_active, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                     ON CONFLICT(source, source_track_id, bucket) DO UPDATE SET
                         title = excluded.title,
                         artists = excluded.artists,
@@ -178,6 +186,7 @@ class Database:
                         duration_seconds = excluded.duration_seconds,
                         cover_url = excluded.cover_url,
                         external_url = excluded.external_url,
+                        source_meta = excluded.source_meta,
                         is_active = 1,
                         updated_at = excluded.updated_at
                     """,
@@ -190,6 +199,7 @@ class Database:
                         int(track.get("duration_seconds") or 0),
                         track.get("cover_url"),
                         track.get("external_url"),
+                        json.dumps(track.get("source_meta") or {}, ensure_ascii=False),
                         bucket,
                         now,
                         now,
@@ -218,7 +228,7 @@ class Database:
             rows = conn.execute(
                 """
                 SELECT source, source_track_id, title, artists, album,
-                       duration_seconds, cover_url, external_url, bucket, updated_at
+                       duration_seconds, cover_url, external_url, source_meta, bucket, updated_at
                 FROM library_tracks
                 WHERE bucket = ? AND is_active = 1
                 ORDER BY updated_at DESC, title COLLATE NOCASE ASC
@@ -226,7 +236,16 @@ class Database:
                 """,
                 (bucket, limit),
             ).fetchall()
-        return [dict(row) for row in rows]
+        tracks = []
+        for row in rows:
+            item = dict(row)
+            raw_meta = item.get("source_meta")
+            try:
+                item["source_meta"] = json.loads(raw_meta) if raw_meta else {}
+            except json.JSONDecodeError:
+                item["source_meta"] = {}
+            tracks.append(item)
+        return tracks
 
     def stats(self) -> dict:
         with self.connect() as conn:
