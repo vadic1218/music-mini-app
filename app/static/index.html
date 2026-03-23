@@ -12,9 +12,9 @@
     <header class="hero">
       <div class="hero__badge">Telegram Mini App</div>
       <h1>KSB Music</h1>
-      <p class="hero__lead">Отдельный интерфейс для поиска, лайков Яндекс.Музыки, текстов песен и личной медиатеки.</p>
+      <p class="hero__lead">Поиск музыки, тексты песен, библиотека, очередь воспроизведения и быстрый доступ к лайкам из Яндекс.Музыки в одном интерфейсе.</p>
       <div class="hero__meta">
-        <span id="user-greeting">Гость</span>
+        <span id="user-greeting">Привет</span>
         <span id="health-pill" class="pill pill--ghost">Проверяю сервисы...</span>
       </div>
     </header>
@@ -31,8 +31,8 @@
     <main class="view-stack">
       <section id="tab-search" class="panel is-active">
         <div class="panel__head">
-          <h2>Поиск треков</h2>
-          <p>Ищет сразу в Яндекс.Музыке и YouTube. Результаты можно сохранять в библиотеку Mini App.</p>
+          <h2>Поиск музыки</h2>
+          <p>Ищите треки в Яндекс.Музыке и YouTube, добавляйте их в библиотеку, ставьте в очередь и слушайте прямо внутри Mini App.</p>
         </div>
         <form id="search-form" class="card">
           <input id="search-query" class="input" placeholder="Например: Oxxxymiron - Нет связи">
@@ -50,12 +50,12 @@
       <section id="tab-liked" class="panel">
         <div class="panel__head">
           <h2>Мне понравилось</h2>
-          <p>Синхронизация лайкнутых треков Яндекс.Музыки в отдельную медиатеку Mini App без привязки к текущему боту.</p>
+          <p>Синхронизируйте свои лайки из Яндекс.Музыки и сразу слушайте их через встроенный плеер Mini App.</p>
         </div>
         <div class="card action-card">
           <div>
-            <strong>Синхронизация Яндекс.Музыки</strong>
-            <p id="liked-status-text">Нажмите кнопку, чтобы подтянуть текущие лайки.</p>
+            <strong>Синхронизация лайков</strong>
+            <p id="liked-status-text">Нажмите кнопку, чтобы обновить вашу коллекцию.</p>
           </div>
           <button id="liked-sync-button" class="primary-button" type="button">Синхронизировать</button>
         </div>
@@ -66,10 +66,10 @@
       <section id="tab-lyrics" class="panel">
         <div class="panel__head">
           <h2>Тексты песен</h2>
-          <p>Сначала ищем в Яндекс.Музыке. Если не нашли, можно явно переключиться на Genius.</p>
+          <p>Сначала поиск идет в Яндекс.Музыке. Если там текста нет, приложение попробует найти его через Genius.</p>
         </div>
         <form id="lyrics-form" class="card">
-          <input id="lyrics-query" class="input" placeholder="Например: группа крови кино">
+          <input id="lyrics-query" class="input" placeholder="Например: Ой да Oxxxymiron">
           <div class="segmented" id="lyrics-source">
             <button type="button" class="segmented__item is-active" data-value="auto">Авто</button>
             <button type="button" class="segmented__item" data-value="yandex">Яндекс</button>
@@ -77,13 +77,13 @@
           </div>
           <button class="primary-button" type="submit">Найти текст</button>
         </form>
-        <div id="lyrics-result" class="lyrics-card empty-state">Текст песни появится здесь.</div>
+        <div id="lyrics-result" class="lyrics-card empty-state">Введите запрос, чтобы увидеть текст песни.</div>
       </section>
 
       <section id="tab-library" class="panel">
         <div class="panel__head">
           <h2>Библиотека</h2>
-          <p>Здесь сохраняются треки, которые вы вручную добавили из поиска.</p>
+          <p>Здесь хранятся треки, которые вы сохранили из поиска или из своей коллекции.</p>
         </div>
         <div id="library-results" class="result-grid"></div>
       </section>
@@ -91,7 +91,7 @@
       <section id="tab-player" class="panel">
         <div class="panel__head">
           <h2>Сейчас играет</h2>
-          <p>Встроенный плеер Mini App. Можно слушать сразу или ставить треки следующими в очередь.</p>
+          <p>Встроенный плеер Mini App. Можно слушать сразу, ставить треки следующими и очищать очередь.</p>
         </div>
         <div class="player-screen card">
           <div class="player-screen__cover" id="player-cover"></div>
@@ -105,7 +105,7 @@
               <span id="player-duration">0:00</span>
             </div>
             <div class="player-controls">
-              <button id="player-prev" class="ghost-button" type="button">Назад</button>
+              <button id="player-prev" class="ghost-button" type="button">Сначала</button>
               <button id="player-toggle" class="primary-button" type="button">Слушать</button>
               <button id="player-next" class="ghost-button" type="button">Следующий</button>
             </div>
@@ -121,7 +121,7 @@
       <section id="tab-status" class="panel">
         <div class="panel__head">
           <h2>Статус</h2>
-          <p>Конфигурация Mini App, доступность источников и краткая статистика.</p>
+          <p>Проверка Mini App, подключенных сервисов и текущего состояния библиотеки.</p>
         </div>
         <div id="status-card" class="card status-card"></div>
       </section>
