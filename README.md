@@ -17,7 +17,7 @@ cd C:\WER\music_mini_app
 python -m venv .venv
 .\.venv\Scripts\pip install -r requirements.txt
 Copy-Item .env.example .env
-.\.venv\Scripts\uvicorn.exe app.main:app --reload
+.\.venv\Scripts\python.exe -m app.main
 ```
 
 Откройте `http://127.0.0.1:8000`.

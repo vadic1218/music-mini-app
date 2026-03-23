@@ -1,12 +1,6 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from flask import Flask, jsonify, request, send_from_directory
 
 from app.config import APP_NAME, APP_BASE_URL, STATIC_DIR, TELEGRAM_BOT_TOKEN, YANDEX_MUSIC_TOKEN
 from app.database import db
@@ -15,115 +9,121 @@ from app.services.search_service import get_yandex_liked_tracks, search_tracks
 from app.services.telegram_auth import validate_init_data
 
 
-class SessionPayload(BaseModel):
-    init_data: str | None = None
-    user: dict | None = None
-
-
-class SaveTrackPayload(BaseModel):
-    source: str
-    source_track_id: str | int
-    title: str
-    artists: str
-    album: str | None = ""
-    duration_seconds: int = 0
-    cover_url: str | None = ""
-    external_url: str | None = ""
-    bucket: str = Field(default="library", pattern="^(library|liked)$")
-
-
-app = FastAPI(title=APP_NAME)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+app = Flask(
+    APP_NAME,
+    static_folder=str(STATIC_DIR),
+    static_url_path="/static",
 )
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-@app.on_event("startup")
-def on_startup() -> None:
+@app.before_request
+def ensure_database() -> None:
     db.init()
 
 
 @app.get("/")
-def index() -> FileResponse:
-    return FileResponse(Path(STATIC_DIR) / "index.html")
+def index():
+    return send_from_directory(STATIC_DIR, "index.html")
 
 
 @app.get("/api/health")
-def health() -> dict:
-    return {
-        "ok": True,
-        "app_name": APP_NAME,
-        "base_url": APP_BASE_URL,
-        "sources": {
-            "yandex": bool(YANDEX_MUSIC_TOKEN),
-            "youtube": True,
-            "lyrics": True,
-        },
-        "stats": db.stats(),
-    }
+def health():
+    return jsonify(
+        {
+            "ok": True,
+            "app_name": APP_NAME,
+            "base_url": APP_BASE_URL,
+            "sources": {
+                "yandex": bool(YANDEX_MUSIC_TOKEN),
+                "youtube": True,
+                "lyrics": True,
+            },
+            "stats": db.stats(),
+        }
+    )
 
 
 @app.post("/api/session")
-def upsert_session(payload: SessionPayload) -> dict:
-    if payload.init_data and TELEGRAM_BOT_TOKEN:
-        if not validate_init_data(payload.init_data, TELEGRAM_BOT_TOKEN):
-            raise HTTPException(status_code=401, detail="Неверные данные Telegram WebApp.")
+def upsert_session():
+    payload = request.get_json(silent=True) or {}
+    init_data = payload.get("init_data")
+    user = payload.get("user")
 
-    if payload.user:
-        db.upsert_user(payload.user)
+    if init_data and TELEGRAM_BOT_TOKEN:
+        if not validate_init_data(init_data, TELEGRAM_BOT_TOKEN):
+            return jsonify({"detail": "Неверные данные Telegram WebApp."}), 401
 
-    return {"ok": True}
+    if user:
+        db.upsert_user(user)
+
+    return jsonify({"ok": True})
 
 
 @app.get("/api/search")
-def api_search(q: str, source: str = "all", limit: int = 20) -> dict:
-    query = q.strip()
+def api_search():
+    query = (request.args.get("q") or "").strip()
+    source = (request.args.get("source") or "all").strip()
+    limit = int(request.args.get("limit") or 20)
     if not query:
-        raise HTTPException(status_code=400, detail="Нужен поисковый запрос.")
+        return jsonify({"detail": "Нужен поисковый запрос."}), 400
     results = search_tracks(query, source=source, limit=limit)
-    return {"query": query, "source": source, "total": len(results), "results": results}
+    return jsonify({"query": query, "source": source, "total": len(results), "results": results})
 
 
 @app.get("/api/lyrics")
-def api_lyrics(q: str, source: str = "auto") -> dict:
-    query = q.strip()
+def api_lyrics():
+    query = (request.args.get("q") or "").strip()
+    source = (request.args.get("source") or "auto").strip()
     if not query:
-        raise HTTPException(status_code=400, detail="Нужен запрос для текста песни.")
+        return jsonify({"detail": "Нужен запрос для текста песни."}), 400
+
     payload, error = get_lyrics(query, source=source)
     if not payload:
-        return {"query": query, "source": source, "found": False, "error": error}
-    return {"query": query, "source": source, "found": True, "lyrics": payload}
+        return jsonify({"query": query, "source": source, "found": False, "error": error})
+    return jsonify({"query": query, "source": source, "found": True, "lyrics": payload})
 
 
 @app.get("/api/library")
-def api_library(bucket: str = "library", limit: int = 200) -> dict:
-    return {"bucket": bucket, "tracks": db.list_tracks(bucket=bucket, limit=limit)}
+def api_library():
+    bucket = (request.args.get("bucket") or "library").strip()
+    limit = int(request.args.get("limit") or 200)
+    return jsonify({"bucket": bucket, "tracks": db.list_tracks(bucket=bucket, limit=limit)})
 
 
 @app.post("/api/library/tracks")
-def api_save_track(payload: SaveTrackPayload) -> dict:
-    db.save_track(payload.model_dump(), bucket=payload.bucket)
-    return {"ok": True}
+def api_save_track():
+    payload = request.get_json(silent=True) or {}
+    bucket = payload.get("bucket", "library")
+    required_fields = ["source", "source_track_id", "title", "artists"]
+    if any(not payload.get(field) for field in required_fields):
+        return jsonify({"detail": "Недостаточно данных для сохранения трека."}), 400
+
+    db.save_track(payload, bucket=bucket)
+    return jsonify({"ok": True})
 
 
 @app.post("/api/liked/sync")
-def api_sync_liked() -> dict:
+def api_sync_liked():
     tracks = get_yandex_liked_tracks()
     if not tracks:
-        return {
-            "ok": False,
-            "message": "Не удалось получить лайки Яндекс.Музыки. Проверьте токен.",
-            "result": None,
-        }
+        return jsonify(
+            {
+                "ok": False,
+                "message": "Не удалось получить лайки Яндекс.Музыки. Проверьте токен.",
+                "result": None,
+            }
+        )
+
     result = db.sync_bucket(tracks, bucket="liked")
-    return {
-        "ok": True,
-        "message": "Синхронизация лайков завершена.",
-        "result": result,
-        "tracks": db.list_tracks(bucket="liked", limit=50),
-    }
+    return jsonify(
+        {
+            "ok": True,
+            "message": "Синхронизация лайков завершена.",
+            "result": result,
+            "tracks": db.list_tracks(bucket="liked", limit=50),
+        }
+    )
+
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=8000, debug=True)
