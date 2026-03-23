@@ -4,7 +4,7 @@ import os
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from app.config import APP_NAME, APP_BASE_URL, STATIC_DIR, TELEGRAM_BOT_TOKEN, YANDEX_MUSIC_TOKEN
+from app.config import APP_NAME, APP_BASE_URL, DATA_DIR, DATABASE_PATH, STATIC_DIR, TELEGRAM_BOT_TOKEN, YANDEX_MUSIC_TOKEN
 from app.database import db
 from app.services.lyrics_service import get_lyrics
 from app.services.search_service import get_yandex_liked_tracks, search_tracks
@@ -35,6 +35,8 @@ def health():
             "ok": True,
             "app_name": APP_NAME,
             "base_url": APP_BASE_URL,
+            "data_dir": str(DATA_DIR),
+            "database_path": str(DATABASE_PATH),
             "sources": {
                 "yandex": bool(YANDEX_MUSIC_TOKEN),
                 "youtube": True,

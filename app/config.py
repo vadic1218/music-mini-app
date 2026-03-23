@@ -32,7 +32,7 @@ load_dotenv(BASE_DIR / ".env")
 requested_data_dir = Path(os.getenv("DATA_DIR", str(BASE_DIR / "data"))).resolve()
 requested_database_path = Path(os.getenv("DATABASE_PATH", str(requested_data_dir / "mini_app.db"))).resolve()
 
-if os.name == "nt" and not _sqlite_path_works(requested_database_path):
+if not _sqlite_path_works(requested_database_path):
     DATA_DIR = _default_local_data_dir(BASE_DIR).resolve()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     DATABASE_PATH = (DATA_DIR / "mini_app.db").resolve()
