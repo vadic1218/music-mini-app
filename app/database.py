@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
-from .config import DATABASE_PATH
+from .config import ADMIN_IDS, DATABASE_PATH
 
 DEFAULT_PROMO_CODES = [
     {
@@ -533,7 +533,17 @@ class Database:
             tracks.append(item)
             if len(tracks) >= limit:
                 break
-        return tracks
+        def sort_key(item: dict):
+            meta = item.get("source_meta") or {}
+            sync_order = meta.get("sync_order")
+            has_sync_order = sync_order is not None
+            try:
+                sync_order_value = int(sync_order) if has_sync_order else 10**9
+            except (TypeError, ValueError):
+                sync_order_value = 10**9
+            return (0 if has_sync_order else 1, sync_order_value, str(item.get("updated_at") or ""))
+
+        return sorted(tracks, key=sort_key)
 
     def mark_download_requested(
         self,
@@ -578,6 +588,13 @@ class Database:
         normalized_user_id = self._normalize_user_id(telegram_user_id)
         if normalized_user_id <= 0:
             return {"access_type": "free", "source": "none", "promo_code": None, "expires_at": None}
+        if normalized_user_id in ADMIN_IDS:
+            return {
+                "access_type": "admin",
+                "source": "admin",
+                "promo_code": None,
+                "expires_at": None,
+            }
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -594,6 +611,12 @@ class Database:
         promo_code = (code or "").strip().upper()
         if normalized_user_id <= 0 or not promo_code:
             return {"ok": False, "message": "Неверные данные для активации промокода."}
+        if normalized_user_id in ADMIN_IDS:
+            return {
+                "ok": False,
+                "message": "Для администратора доступ уже активен без промокода.",
+                "status": self.get_access_status(normalized_user_id),
+            }
 
         with self.connect() as conn:
             existing_access = conn.execute(

@@ -392,7 +392,10 @@ function enqueueTrack(track, { next = false } = {}) {
   }
 
   state.queue = state.queue.filter((item) => trackKey(item) !== key);
-  if (next) state.queue.unshift(track);
+  if (next) {
+    const tail = state.queue.filter((item) => trackKey(item) !== key);
+    state.queue = [track, ...tail];
+  }
   else state.queue.push(track);
   renderQueue();
   updatePlayerUi();
@@ -614,6 +617,10 @@ function renderAccessStatus() {
   const node = $("#promo-status");
   if (!node) return;
   const status = state.accessStatus || { access_type: "free", source: "none", promo_code: null, expires_at: null };
+  if (status.access_type === "admin") {
+    node.textContent = "Администраторский доступ активен без ограничений.";
+    return;
+  }
   if (status.access_type === "premium") {
     const sourceLabel = status.promo_code ? `Промокод: ${status.promo_code}` : "Доступ активен";
     const expires = status.expires_at ? ` до ${String(status.expires_at).split("T")[0].split(" ")[0]}` : " без срока";

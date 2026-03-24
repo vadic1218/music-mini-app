@@ -437,7 +437,15 @@ def api_sync_liked():
     result = db.sync_bucket(tracks, bucket="liked", telegram_user_id=telegram_user_id)
     _write_liked_cache(telegram_user_id, tracks)
     library_new_tracks: list[dict] = []
-    for track in tracks:
+    for index, track in enumerate(tracks):
+        track = {
+            **track,
+            "source_meta": {
+                **(track.get("source_meta") or {}),
+                "sync_order": index,
+                "synced_from": "liked",
+            },
+        }
         existed = db.has_track(
             track.get("source"),
             track.get("source_track_id"),

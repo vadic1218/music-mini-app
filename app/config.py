@@ -29,6 +29,19 @@ APP_DIR = BASE_DIR / "app"
 STATIC_DIR = APP_DIR / "static"
 load_dotenv(BASE_DIR / ".env")
 
+
+def _parse_admin_ids(raw_value: str) -> list[int]:
+    admin_ids: list[int] = []
+    for chunk in (raw_value or "").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        try:
+            admin_ids.append(int(chunk))
+        except ValueError:
+            continue
+    return admin_ids
+
 requested_data_dir = Path(os.getenv("DATA_DIR", str(BASE_DIR / "data"))).resolve()
 requested_database_path = Path(os.getenv("DATABASE_PATH", str(requested_data_dir / "mini_app.db"))).resolve()
 
@@ -44,6 +57,7 @@ else:
 APP_NAME = os.getenv("APP_NAME", "KSB Music Mini App")
 APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
 TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+ADMIN_IDS = _parse_admin_ids(os.getenv("ADMIN_IDS", ""))
 YANDEX_MUSIC_TOKEN = os.getenv("YANDEX_MUSIC_TOKEN", "").strip()
 SEARCH_RESULTS_PER_SOURCE = max(5, int(os.getenv("SEARCH_RESULTS_PER_SOURCE", "20")))
 LYRICS_RESULTS_LIMIT = max(5, int(os.getenv("LYRICS_RESULTS_LIMIT", "10")))
