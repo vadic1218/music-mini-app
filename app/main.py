@@ -46,6 +46,20 @@ def _extract_telegram_user_id(payload: dict | None = None) -> int:
     return 0
 
 
+def _seed_library_from_liked_if_empty(telegram_user_id: int) -> int:
+    library_tracks = db.list_tracks(bucket="library", limit=1, telegram_user_id=telegram_user_id)
+    if library_tracks:
+        return 0
+
+    liked_tracks = db.list_tracks(bucket="liked", limit=5000, telegram_user_id=telegram_user_id)
+    if not liked_tracks:
+        return 0
+
+    for track in liked_tracks:
+        db.save_track(track, bucket="library", telegram_user_id=telegram_user_id)
+    return len(liked_tracks)
+
+
 @app.before_request
 def ensure_database() -> None:
     db.init()
@@ -125,18 +139,29 @@ def api_library():
     query = (request.args.get("query") or "").strip()
     limit = int(request.args.get("limit") or 2000)
     downloaded_only = (request.args.get("downloaded_only") or "").strip().lower() in {"1", "true", "yes"}
+    tracks = db.list_tracks(
+        bucket=bucket,
+        limit=limit,
+        query=query,
+        downloaded_only=downloaded_only,
+        telegram_user_id=telegram_user_id,
+    )
+    if bucket == "library" and not query and not downloaded_only and not tracks:
+        _seed_library_from_liked_if_empty(telegram_user_id)
+        tracks = db.list_tracks(
+            bucket=bucket,
+            limit=limit,
+            query=query,
+            downloaded_only=downloaded_only,
+            telegram_user_id=telegram_user_id,
+        )
+
     return jsonify(
         {
             "bucket": bucket,
             "query": query,
             "downloaded_only": downloaded_only,
-            "tracks": db.list_tracks(
-                bucket=bucket,
-                limit=limit,
-                query=query,
-                downloaded_only=downloaded_only,
-                telegram_user_id=telegram_user_id,
-            ),
+            "tracks": tracks,
         }
     )
 
@@ -226,10 +251,16 @@ def api_sync_liked():
         if not existed:
             library_new_tracks.append(track)
 
+    seeded_count = _seed_library_from_liked_if_empty(telegram_user_id)
+
     return jsonify(
         {
             "ok": True,
-            "message": "Синхронизация лайков завершена.",
+            "message": (
+                "Синхронизация лайков завершена."
+                if not seeded_count
+                else f"Синхронизация лайков завершена. Библиотека восстановлена: {seeded_count} треков."
+            ),
             "result": result,
             "tracks": db.list_tracks(bucket="liked", limit=2000, telegram_user_id=telegram_user_id),
             "library_new_tracks": library_new_tracks,
