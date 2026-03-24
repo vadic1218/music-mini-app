@@ -125,41 +125,18 @@ def _library_tracks_with_fallback(
     limit: int = 2000,
     downloaded_only: bool = False,
 ) -> list[dict]:
-    tracks = db.list_tracks(
-        bucket="library",
+    tracks = db.list_user_library(
         limit=limit,
         query=query,
         downloaded_only=downloaded_only,
         telegram_user_id=telegram_user_id,
     )
-    liked_tracks = db.list_tracks(
-        bucket="liked",
-        limit=max(limit, 5000),
-        query=query,
-        downloaded_only=downloaded_only,
-        telegram_user_id=telegram_user_id,
-    )
-
-    # Library in the Mini App should always reflect both explicitly saved tracks
-    # and synchronized liked tracks for the same Telegram user.
-    merged: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    for track in tracks + liked_tracks:
-        key = (str(track.get("source") or ""), str(track.get("source_track_id") or ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(track)
-        if len(merged) >= limit:
-            break
-
-    if merged:
-        return merged
+    if tracks:
+        return tracks
 
     if not query:
         _seed_library_from_liked_if_empty(telegram_user_id)
-        tracks = db.list_tracks(
-            bucket="library",
+        tracks = db.list_user_library(
             limit=limit,
             query="",
             downloaded_only=False,
@@ -167,11 +144,6 @@ def _library_tracks_with_fallback(
         )
         if tracks:
             return tracks
-    if liked_tracks:
-        for track in liked_tracks:
-            db.save_track(track, bucket="library", telegram_user_id=telegram_user_id)
-        _write_library_cache(telegram_user_id, liked_tracks[:limit])
-        return liked_tracks[:limit]
 
     cached_library_tracks = _read_library_cache(telegram_user_id)
     if cached_library_tracks:
@@ -270,6 +242,25 @@ def health():
             "stats": db.stats(),
         }
     )
+
+
+@app.get("/api/access/status")
+def api_access_status():
+    telegram_user_id = _extract_telegram_user_id()
+    return jsonify({"ok": True, "status": db.get_access_status(telegram_user_id)})
+
+
+@app.post("/api/access/promo")
+def api_activate_promo():
+    payload = request.get_json(silent=True) or {}
+    telegram_user_id = _extract_telegram_user_id(payload)
+    code = (payload.get("code") or "").strip()
+    if not code:
+        return jsonify({"detail": "Введите промокод."}), 400
+    result = db.activate_promo_code(telegram_user_id, code)
+    if not result.get("ok"):
+        return jsonify(result), 400
+    return jsonify(result)
 
 
 @app.post("/api/session")

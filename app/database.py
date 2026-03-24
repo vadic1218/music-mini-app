@@ -3,11 +3,42 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
 from .config import DATABASE_PATH
+
+DEFAULT_PROMO_CODES = [
+    {
+        "code": "WELCOME",
+        "subscription_type": "premium",
+        "max_uses": 1,
+        "days": 30,
+        "description": "Промокод WELCOME - 1 использование",
+    },
+    {
+        "code": "TEST123",
+        "subscription_type": "premium",
+        "max_uses": 1,
+        "days": 30,
+        "description": "Тестовый промокод TEST123",
+    },
+    {
+        "code": "V1_GAN13",
+        "subscription_type": "premium",
+        "max_uses": 1,
+        "days": None,
+        "description": "Вечный промокод V1_GAN13",
+    },
+    {
+        "code": "FREEMUSIC",
+        "subscription_type": "premium",
+        "max_uses": 1,
+        "days": 30,
+        "description": "Промокод FREEMUSIC - 1 использование",
+    },
+]
 
 
 def utcnow() -> str:
@@ -53,6 +84,27 @@ class Database:
                     existing_count INTEGER NOT NULL DEFAULT 0,
                     removed_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS promo_codes (
+                    code TEXT PRIMARY KEY,
+                    subscription_type TEXT NOT NULL DEFAULT 'premium',
+                    max_uses INTEGER NOT NULL DEFAULT 1,
+                    uses_count INTEGER NOT NULL DEFAULT 0,
+                    expiry_date TEXT,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    description TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS access_grants (
+                    telegram_user_id INTEGER PRIMARY KEY,
+                    access_type TEXT NOT NULL DEFAULT 'free',
+                    source TEXT NOT NULL DEFAULT 'none',
+                    promo_code TEXT,
+                    expires_at TEXT,
+                    updated_at TEXT NOT NULL
                 );
                 """
             )
@@ -124,7 +176,36 @@ class Database:
                 ON library_tracks(telegram_user_id, bucket, title COLLATE NOCASE);
                 """
             )
+            self._seed_default_promos(conn)
         self._initialized = True
+
+    def _seed_default_promos(self, conn) -> None:
+        now = utcnow()
+        for promo in DEFAULT_PROMO_CODES:
+            expiry_date = None
+            if promo["days"]:
+                expiry_date = (
+                    datetime.now(timezone.utc).replace(microsecond=0) +
+                    timedelta(days=int(promo["days"]))
+                ).isoformat(sep=" ")
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO promo_codes (
+                    code, subscription_type, max_uses, uses_count, expiry_date,
+                    is_active, description, created_at, updated_at
+                )
+                VALUES (?, ?, ?, 0, ?, 1, ?, ?, ?)
+                """,
+                (
+                    promo["code"],
+                    promo["subscription_type"],
+                    promo["max_uses"],
+                    expiry_date,
+                    promo["description"],
+                    now,
+                    now,
+                ),
+            )
 
     @staticmethod
     def _normalize_user_id(telegram_user_id: int | str | None) -> int:
@@ -392,6 +473,68 @@ class Database:
                 break
         return tracks
 
+    def list_user_library(
+        self,
+        limit: int = 2000,
+        query: str | None = None,
+        downloaded_only: bool = False,
+        telegram_user_id: int | str | None = None,
+    ) -> list[dict]:
+        normalized_user_id = self._normalize_user_id(telegram_user_id)
+        normalized_query = (query or "").strip().casefold()
+        with self.connect() as conn:
+            downloaded_clause = " AND download_requested_at IS NOT NULL" if downloaded_only else ""
+            base_limit = max(limit * 5, 2000)
+            rows = conn.execute(
+                f"""
+                SELECT source, source_track_id, title, artists, album,
+                       duration_seconds, cover_url, external_url, source_meta, bucket, updated_at, download_requested_at
+                FROM library_tracks
+                WHERE telegram_user_id = ?
+                  AND bucket IN ('library', 'liked')
+                  AND is_active = 1
+                  {downloaded_clause}
+                ORDER BY
+                  CASE bucket WHEN 'library' THEN 0 ELSE 1 END,
+                  updated_at DESC,
+                  title COLLATE NOCASE ASC
+                LIMIT ?
+                """,
+                (normalized_user_id, base_limit),
+            ).fetchall()
+
+        tracks: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for row in rows:
+            item = dict(row)
+            raw_meta = item.get("source_meta")
+            try:
+                item["source_meta"] = json.loads(raw_meta) if raw_meta else {}
+            except json.JSONDecodeError:
+                item["source_meta"] = {}
+
+            if normalized_query:
+                haystack = " ".join(
+                    [
+                        str(item.get("title") or ""),
+                        str(item.get("artists") or ""),
+                        str(item.get("album") or ""),
+                    ]
+                ).casefold()
+                if normalized_query not in haystack:
+                    continue
+
+            key = (str(item.get("source") or ""), str(item.get("source_track_id") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+
+            item["bucket"] = "library"
+            tracks.append(item)
+            if len(tracks) >= limit:
+                break
+        return tracks
+
     def mark_download_requested(
         self,
         source: str,
@@ -430,6 +573,89 @@ class Database:
             "user_count": user_count,
             "last_sync": dict(last_sync) if last_sync else None,
         }
+
+    def get_access_status(self, telegram_user_id: int | str | None) -> dict:
+        normalized_user_id = self._normalize_user_id(telegram_user_id)
+        if normalized_user_id <= 0:
+            return {"access_type": "free", "source": "none", "promo_code": None, "expires_at": None}
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT access_type, source, promo_code, expires_at, updated_at
+                FROM access_grants
+                WHERE telegram_user_id = ?
+                """,
+                (normalized_user_id,),
+            ).fetchone()
+        return dict(row) if row else {"access_type": "free", "source": "none", "promo_code": None, "expires_at": None}
+
+    def activate_promo_code(self, telegram_user_id: int | str | None, code: str) -> dict:
+        normalized_user_id = self._normalize_user_id(telegram_user_id)
+        promo_code = (code or "").strip().upper()
+        if normalized_user_id <= 0 or not promo_code:
+            return {"ok": False, "message": "Неверные данные для активации промокода."}
+
+        with self.connect() as conn:
+            existing_access = conn.execute(
+                "SELECT access_type, source, promo_code, expires_at FROM access_grants WHERE telegram_user_id = ?",
+                (normalized_user_id,),
+            ).fetchone()
+            if existing_access and existing_access["access_type"] == "premium":
+                return {
+                    "ok": False,
+                    "message": "У вас уже активирован доступ в Mini App.",
+                    "status": dict(existing_access),
+                }
+
+            promo = conn.execute(
+                """
+                SELECT code, subscription_type, max_uses, uses_count, expiry_date, is_active, description
+                FROM promo_codes
+                WHERE code = ?
+                """,
+                (promo_code,),
+            ).fetchone()
+            if not promo:
+                return {"ok": False, "message": "Промокод не найден."}
+            if not promo["is_active"]:
+                return {"ok": False, "message": "Промокод отключен."}
+            if promo["max_uses"] is not None and promo["uses_count"] >= promo["max_uses"]:
+                return {"ok": False, "message": "Промокод уже израсходован."}
+
+            expires_at = None
+            if promo_code != "V1_GAN13":
+                expires_at = promo["expiry_date"]
+
+            now = utcnow()
+            conn.execute(
+                """
+                INSERT INTO access_grants (telegram_user_id, access_type, source, promo_code, expires_at, updated_at)
+                VALUES (?, 'premium', 'promo', ?, ?, ?)
+                ON CONFLICT(telegram_user_id) DO UPDATE SET
+                    access_type = excluded.access_type,
+                    source = excluded.source,
+                    promo_code = excluded.promo_code,
+                    expires_at = excluded.expires_at,
+                    updated_at = excluded.updated_at
+                """,
+                (normalized_user_id, promo_code, expires_at, now),
+            )
+            conn.execute(
+                "UPDATE promo_codes SET uses_count = uses_count + 1, updated_at = ? WHERE code = ?",
+                (now, promo_code),
+            )
+
+            status = {
+                "access_type": "premium",
+                "source": "promo",
+                "promo_code": promo_code,
+                "expires_at": expires_at,
+            }
+            return {
+                "ok": True,
+                "message": "Промокод успешно активирован.",
+                "status": status,
+            }
 
 
 db = Database(DATABASE_PATH)

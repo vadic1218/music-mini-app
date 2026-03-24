@@ -3,6 +3,7 @@ const state = {
   lyricsSource: "auto",
   telegramUser: null,
   health: null,
+  accessStatus: null,
   currentTrack: null,
   currentCollection: [],
   queue: [],
@@ -297,7 +298,7 @@ async function triggerTrackDownload(track, bucket = "library") {
   await markTrackDownloaded(track, bucket);
 }
 
-function buildQueueFromCollection(track, collectionTracks) {
+function buildQueueFromCollection(track, collectionTracks, { wrap = false } = {}) {
   state.currentCollection = Array.isArray(collectionTracks) ? collectionTracks : [];
   const current = trackKey(track);
   const currentIndex = state.currentCollection.findIndex((item) => trackKey(item) === current);
@@ -306,9 +307,14 @@ function buildQueueFromCollection(track, collectionTracks) {
     return;
   }
 
-  state.queue = state.shuffle
-    ? shuffleArray(state.currentCollection.filter((item) => trackKey(item) !== current))
-    : state.currentCollection.slice(currentIndex + 1).concat(state.currentCollection.slice(0, currentIndex));
+  if (state.shuffle) {
+    state.queue = shuffleArray(state.currentCollection.filter((item) => trackKey(item) !== current));
+    return;
+  }
+
+  const after = state.currentCollection.slice(currentIndex + 1);
+  const before = wrap ? state.currentCollection.slice(0, currentIndex) : [];
+  state.queue = after.concat(before);
 }
 
 function updateModeButtons() {
@@ -371,7 +377,7 @@ async function playTrack(track) {
 }
 
 async function startCollectionPlayback(track, collectionTracks) {
-  buildQueueFromCollection(track, collectionTracks);
+  buildQueueFromCollection(track, collectionTracks, { wrap: state.repeatMode === "all" });
   renderQueue();
   await playTrack(track);
 }
@@ -379,12 +385,13 @@ async function startCollectionPlayback(track, collectionTracks) {
 function enqueueTrack(track, { next = false } = {}) {
   const key = trackKey(track);
   const currentKey = state.currentTrack ? trackKey(state.currentTrack) : null;
-  if (currentKey === key || state.queue.some((item) => trackKey(item) === key)) {
+  if (currentKey === key) {
     renderQueue();
     updatePlayerUi();
     return;
   }
 
+  state.queue = state.queue.filter((item) => trackKey(item) !== key);
   if (next) state.queue.unshift(track);
   else state.queue.push(track);
   renderQueue();
@@ -402,8 +409,8 @@ async function playNextTrack() {
     return;
   }
 
-  if (!state.queue.length && state.repeatMode === "all" && state.currentCollection.length && state.currentTrack) {
-    buildQueueFromCollection(state.currentTrack, state.currentCollection);
+  if (!state.queue.length && state.currentCollection.length && state.currentTrack) {
+    buildQueueFromCollection(state.currentTrack, state.currentCollection, { wrap: state.repeatMode === "all" });
   }
 
   const nextTrack = state.queue.shift();
@@ -603,6 +610,45 @@ async function loadHealth() {
   }
 }
 
+function renderAccessStatus() {
+  const node = $("#promo-status");
+  if (!node) return;
+  const status = state.accessStatus || { access_type: "free", source: "none", promo_code: null, expires_at: null };
+  if (status.access_type === "premium") {
+    const sourceLabel = status.promo_code ? `Промокод: ${status.promo_code}` : "Доступ активен";
+    const expires = status.expires_at ? ` до ${String(status.expires_at).split("T")[0].split(" ")[0]}` : " без срока";
+    node.textContent = `${sourceLabel}${expires}`;
+    return;
+  }
+  node.textContent = "Доступ Mini App не активирован.";
+}
+
+async function loadAccessStatus() {
+  const payload = await request(
+    `/api/access/status?telegram_user_id=${encodeURIComponent(currentUserId())}`
+  );
+  state.accessStatus = payload.status || null;
+  renderAccessStatus();
+}
+
+async function activatePromo(event) {
+  event.preventDefault();
+  const input = $("#promo-code-input");
+  const code = input.value.trim();
+  if (!code) {
+    renderAccessStatus();
+    $("#promo-status").textContent = "Введите промокод.";
+    return;
+  }
+  const payload = await request("/api/access/promo", {
+    method: "POST",
+    body: JSON.stringify({ telegram_user_id: ensureUserId(), code }),
+  });
+  state.accessStatus = payload.status || null;
+  input.value = "";
+  renderAccessStatus();
+}
+
 async function performSearch(event) {
   event.preventDefault();
   const query = $("#search-query").value.trim();
@@ -787,6 +833,7 @@ async function bootstrap() {
   restorePlayerState();
   restoreLibrarySnapshot();
   await loadHealth();
+  await loadAccessStatus();
   await loadLibrary("");
   await loadDownloads("");
   renderQueue();
@@ -831,9 +878,16 @@ document.addEventListener("DOMContentLoaded", () => {
     $("#library-sync-button").addEventListener("click", () => syncLibraryFromLiked().catch((error) => setStatusText(error.message, "library-sync")));
     $("#library-download-all-button").addEventListener("click", () => downloadLibraryTracks().catch((error) => setStatusText(error.message, "library-sync")));
     $("#playlist-import-form").addEventListener("submit", (event) => importPlaylistByUrl(event).catch((error) => setStatusText(error.message, "library-sync")));
+    $("#promo-form").addEventListener("submit", (event) => activatePromo(event).catch((error) => {
+      $("#promo-status").textContent = error.message;
+    }));
 
     $("#shuffle-toggle").addEventListener("click", () => {
       state.shuffle = !state.shuffle;
+      if (state.currentTrack && state.currentCollection.length) {
+        buildQueueFromCollection(state.currentTrack, state.currentCollection, { wrap: state.repeatMode === "all" });
+        renderQueue();
+      }
       updatePlayerUi();
     });
     $("#repeat-toggle").addEventListener("click", () => {
