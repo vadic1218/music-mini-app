@@ -20,6 +20,8 @@ const STORAGE_KEYS = {
   shuffle: "ksb-mini-app-shuffle-v3",
   repeatMode: "ksb-mini-app-repeat-mode-v3",
   userId: "ksb-mini-app-user-id-v3",
+  librarySnapshot: "ksb-mini-app-library-v4",
+  downloadsSnapshot: "ksb-mini-app-downloads-v4",
 };
 
 function $(selector) {
@@ -113,6 +115,27 @@ function persistPlayerState() {
   }
 }
 
+function persistLibrarySnapshot() {
+  try {
+    localStorage.setItem(STORAGE_KEYS.librarySnapshot, JSON.stringify(state.libraryTracks || []));
+    localStorage.setItem(STORAGE_KEYS.downloadsSnapshot, JSON.stringify(state.downloadedTracks || []));
+  } catch (error) {
+    console.warn(error);
+  }
+}
+
+function restoreLibrarySnapshot() {
+  try {
+    const librarySnapshot = JSON.parse(localStorage.getItem(STORAGE_KEYS.librarySnapshot) || "[]");
+    const downloadsSnapshot = JSON.parse(localStorage.getItem(STORAGE_KEYS.downloadsSnapshot) || "[]");
+    if (Array.isArray(librarySnapshot)) state.libraryTracks = librarySnapshot;
+    if (Array.isArray(downloadsSnapshot)) state.downloadedTracks = downloadsSnapshot;
+  } catch (error) {
+    state.libraryTracks = [];
+    state.downloadedTracks = [];
+  }
+}
+
 function restorePlayerState() {
   try {
     state.queue = JSON.parse(localStorage.getItem(STORAGE_KEYS.queue) || "[]");
@@ -125,6 +148,39 @@ function restorePlayerState() {
     state.shuffle = false;
     state.repeatMode = "off";
   }
+}
+
+function renderLibraryResults(query = "") {
+  const container = $("#library-results");
+  $("#library-summary").textContent = query
+    ? `Найдено в библиотеке: ${state.libraryTracks.length}`
+    : `Всего в библиотеке: ${state.libraryTracks.length}`;
+  container.innerHTML = "";
+  if (!state.libraryTracks.length) {
+    container.innerHTML =
+      '<div class="lyrics-card empty-state">Библиотека пока пустая. Синхронизируйте лайки или добавьте трек из поиска.</div>';
+    return;
+  }
+  prefetchPlaybackUrls(state.libraryTracks);
+  state.libraryTracks.forEach((track) => {
+    container.appendChild(createTrackCard(track, { openLyricsButton: true, collectionTracks: state.libraryTracks }));
+  });
+}
+
+function renderDownloadsResults(query = "") {
+  const container = $("#downloads-results");
+  $("#downloads-summary").textContent = query
+    ? `Найдено среди скачанных: ${state.downloadedTracks.length}`
+    : `Скачанных треков: ${state.downloadedTracks.length}`;
+  container.innerHTML = "";
+  if (!state.downloadedTracks.length) {
+    container.innerHTML = '<div class="lyrics-card empty-state">Скачанных треков пока нет.</div>';
+    return;
+  }
+  prefetchPlaybackUrls(state.downloadedTracks);
+  state.downloadedTracks.forEach((track) => {
+    container.appendChild(createTrackCard(track, { openLyricsButton: true, collectionTracks: state.downloadedTracks }));
+  });
 }
 
 function shuffleArray(items) {
@@ -486,19 +542,25 @@ function createTrackCard(track, { saveButton = false, openLyricsButton = false, 
     saveButtonNode.disabled = alreadySaved;
     saveButtonNode.addEventListener("click", async () => {
       try {
-        await request("/api/library/tracks", {
+        const payload = await request("/api/library/tracks", {
           method: "POST",
           body: JSON.stringify({ ...track, bucket: "library", telegram_user_id: ensureUserId() }),
         });
-        if (!getLibraryMirror(track)) {
+        const responseTracks = Array.isArray(payload.tracks) ? payload.tracks : [];
+        if (responseTracks.length) {
+          state.libraryTracks = responseTracks;
+          persistLibrarySnapshot();
+        } else if (!getLibraryMirror(track)) {
           state.libraryTracks.unshift({
             ...track,
             bucket: "library",
             download_requested_at: track.download_requested_at || null,
           });
+          persistLibrarySnapshot();
         }
         const queryNode = $("#library-query");
         if (queryNode) queryNode.value = "";
+        renderLibraryResults("");
         await loadLibrary("");
         saveButtonNode.textContent = "Уже в библиотеке";
         saveButtonNode.disabled = true;
@@ -576,41 +638,39 @@ async function loadLibrary(query = "") {
   const payload = await request(
     `/api/library?bucket=library&limit=2000&telegram_user_id=${encodeURIComponent(currentUserId())}&query=${encodeURIComponent((query || "").trim())}`
   );
-  state.libraryTracks = payload.tracks || [];
-  const container = $("#library-results");
-  $("#library-summary").textContent = query
-    ? `Найдено в библиотеке: ${state.libraryTracks.length}`
-    : `Всего в библиотеке: ${state.libraryTracks.length}`;
-  container.innerHTML = "";
-  if (!state.libraryTracks.length) {
-    container.innerHTML =
-      '<div class="lyrics-card empty-state">Библиотека пока пустая. Синхронизируйте лайки или добавьте трек из поиска.</div>';
-    return;
+  const tracks = Array.isArray(payload.tracks) ? payload.tracks : [];
+  if (tracks.length) {
+    state.libraryTracks = tracks;
+    persistLibrarySnapshot();
+  } else if (!query && state.libraryTracks.length) {
+    persistLibrarySnapshot();
+  } else if (!query) {
+    const likedPayload = await request(
+      `/api/library?bucket=liked&limit=2000&telegram_user_id=${encodeURIComponent(currentUserId())}&query=`
+    );
+    const likedTracks = Array.isArray(likedPayload.tracks) ? likedPayload.tracks : [];
+    if (likedTracks.length) {
+      state.libraryTracks = likedTracks.map((track) => ({ ...track, bucket: "library" }));
+      persistLibrarySnapshot();
+    } else {
+      restoreLibrarySnapshot();
+    }
   }
-  prefetchPlaybackUrls(state.libraryTracks);
-  state.libraryTracks.forEach((track) => {
-    container.appendChild(createTrackCard(track, { openLyricsButton: true, collectionTracks: state.libraryTracks }));
-  });
+  renderLibraryResults(query);
 }
 
 async function loadDownloads(query = "") {
   const payload = await request(
     `/api/library?bucket=library&downloaded_only=1&limit=2000&telegram_user_id=${encodeURIComponent(currentUserId())}&query=${encodeURIComponent((query || "").trim())}`
   );
-  state.downloadedTracks = payload.tracks || [];
-  const container = $("#downloads-results");
-  $("#downloads-summary").textContent = query
-    ? `Найдено среди скачанных: ${state.downloadedTracks.length}`
-    : `Скачанных треков: ${state.downloadedTracks.length}`;
-  container.innerHTML = "";
-  if (!state.downloadedTracks.length) {
-    container.innerHTML = '<div class="lyrics-card empty-state">Скачанных треков пока нет.</div>';
-    return;
+  const tracks = Array.isArray(payload.tracks) ? payload.tracks : [];
+  if (tracks.length) {
+    state.downloadedTracks = tracks;
+    persistLibrarySnapshot();
+  } else if (!query) {
+    restoreLibrarySnapshot();
   }
-  prefetchPlaybackUrls(state.downloadedTracks);
-  state.downloadedTracks.forEach((track) => {
-    container.appendChild(createTrackCard(track, { openLyricsButton: true, collectionTracks: state.downloadedTracks }));
-  });
+  renderDownloadsResults(query);
 }
 
 function renderLibrarySyncStats(result) {
@@ -637,6 +697,21 @@ async function syncLibraryFromLiked() {
   });
   setStatusText(payload.message, "library-sync");
   if (payload.result) renderLibrarySyncStats(payload.result);
+  if (Array.isArray(payload.tracks) && payload.tracks.length) {
+    state.libraryTracks = payload.tracks.map((track) => ({ ...track, bucket: "library" }));
+    persistLibrarySnapshot();
+    renderLibraryResults("");
+  } else {
+    const likedPayload = await request(
+      `/api/library?bucket=liked&limit=2000&telegram_user_id=${encodeURIComponent(ensureUserId())}&query=`
+    );
+    const likedTracks = Array.isArray(likedPayload.tracks) ? likedPayload.tracks : [];
+    if (likedTracks.length) {
+      state.libraryTracks = likedTracks.map((track) => ({ ...track, bucket: "library" }));
+      persistLibrarySnapshot();
+      renderLibraryResults("");
+    }
+  }
   const queryNode = $("#library-query");
   if (queryNode) queryNode.value = "";
   await loadLibrary($("#library-query")?.value?.trim() || "");
@@ -676,6 +751,11 @@ async function importPlaylistByUrl(event) {
   });
   $("#playlist-url").value = "";
   setStatusText(`${payload.message} Импортировано новых: ${payload.imported}, уже было: ${payload.existing}.`, "library-sync");
+  if (Array.isArray(payload.tracks) && payload.tracks.length) {
+    state.libraryTracks = payload.tracks;
+    persistLibrarySnapshot();
+    renderLibraryResults($("#library-query")?.value?.trim() || "");
+  }
   await loadLibrary($("#library-query")?.value?.trim() || "");
   await loadHealth();
 }
@@ -705,6 +785,7 @@ async function bootstrap() {
   }
 
   restorePlayerState();
+  restoreLibrarySnapshot();
   await loadHealth();
   await loadLibrary("");
   await loadDownloads("");

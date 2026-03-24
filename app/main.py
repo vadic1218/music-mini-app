@@ -52,6 +52,10 @@ def _liked_cache_path(telegram_user_id: int) -> Path:
     return DATA_DIR / f"liked_cache_{telegram_user_id}.json"
 
 
+def _library_cache_path(telegram_user_id: int) -> Path:
+    return DATA_DIR / f"library_cache_{telegram_user_id}.json"
+
+
 def _write_liked_cache(telegram_user_id: int, tracks: list[dict]) -> None:
     if telegram_user_id <= 0:
         return
@@ -64,10 +68,34 @@ def _write_liked_cache(telegram_user_id: int, tracks: list[dict]) -> None:
         pass
 
 
+def _write_library_cache(telegram_user_id: int, tracks: list[dict]) -> None:
+    if telegram_user_id <= 0:
+        return
+    try:
+        _library_cache_path(telegram_user_id).write_text(
+            json.dumps(tracks, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def _read_liked_cache(telegram_user_id: int) -> list[dict]:
     if telegram_user_id <= 0:
         return []
     path = _liked_cache_path(telegram_user_id)
+    if not path.exists():
+        return []
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _read_library_cache(telegram_user_id: int) -> list[dict]:
+    if telegram_user_id <= 0:
+        return []
+    path = _library_cache_path(telegram_user_id)
     if not path.exists():
         return []
     try:
@@ -142,7 +170,31 @@ def _library_tracks_with_fallback(
     if liked_tracks:
         for track in liked_tracks:
             db.save_track(track, bucket="library", telegram_user_id=telegram_user_id)
+        _write_library_cache(telegram_user_id, liked_tracks[:limit])
         return liked_tracks[:limit]
+
+    cached_library_tracks = _read_library_cache(telegram_user_id)
+    if cached_library_tracks:
+        filtered_library_tracks: list[dict] = []
+        query_cf = (query or "").strip().casefold()
+        for track in cached_library_tracks:
+            if downloaded_only and not track.get("download_requested_at"):
+                continue
+            if query_cf:
+                haystack = " ".join(
+                    [
+                        str(track.get("title") or ""),
+                        str(track.get("artists") or ""),
+                        str(track.get("album") or ""),
+                    ]
+                ).casefold()
+                if query_cf not in haystack:
+                    continue
+            filtered_library_tracks.append(track)
+            if len(filtered_library_tracks) >= limit:
+                break
+        if filtered_library_tracks:
+            return filtered_library_tracks
 
     cached_tracks = _read_liked_cache(telegram_user_id)
     if cached_tracks:
@@ -167,7 +219,17 @@ def _library_tracks_with_fallback(
             if len(filtered_tracks) >= limit:
                 break
         if filtered_tracks:
+            _write_library_cache(telegram_user_id, filtered_tracks)
             return filtered_tracks
+
+    live_liked_tracks = get_yandex_liked_tracks(limit=max(limit, 2000))
+    if live_liked_tracks:
+        for track in live_liked_tracks:
+            db.save_track(track, bucket="liked", telegram_user_id=telegram_user_id)
+            db.save_track(track, bucket="library", telegram_user_id=telegram_user_id)
+        _write_liked_cache(telegram_user_id, live_liked_tracks)
+        _write_library_cache(telegram_user_id, live_liked_tracks[:limit])
+        return live_liked_tracks[:limit]
 
     return tracks
 
@@ -282,6 +344,14 @@ def api_library():
             telegram_user_id=telegram_user_id,
         )
 
+    if bucket == "library" and tracks:
+        _write_library_cache(telegram_user_id, tracks)
+    if bucket == "library":
+        print(
+            f"[MiniApp] library request user={telegram_user_id} "
+            f"query={query!r} downloaded_only={downloaded_only} count={len(tracks)}"
+        )
+
     return jsonify(
         {
             "bucket": bucket,
@@ -302,6 +372,15 @@ def api_save_track():
         return jsonify({"detail": "Недостаточно данных для сохранения трека."}), 400
 
     db.save_track(payload, bucket=bucket, telegram_user_id=telegram_user_id)
+    if bucket == "library":
+        refreshed_tracks = _library_tracks_with_fallback(telegram_user_id, limit=2000)
+        _write_library_cache(telegram_user_id, refreshed_tracks)
+        print(
+            f"[MiniApp] saved library track user={telegram_user_id} "
+            f"source={payload.get('source')} track_id={payload.get('source_track_id')} "
+            f"library_count={len(refreshed_tracks)}"
+        )
+        return jsonify({"ok": True, "track": payload, "tracks": refreshed_tracks})
     return jsonify({"ok": True, "track": payload})
 
 
@@ -379,6 +458,13 @@ def api_sync_liked():
             library_new_tracks.append(track)
 
     seeded_count = _seed_library_from_liked_if_empty(telegram_user_id)
+    library_tracks = _library_tracks_with_fallback(telegram_user_id, limit=2000)
+    _write_library_cache(telegram_user_id, library_tracks)
+    print(
+        f"[MiniApp] liked sync user={telegram_user_id} "
+        f"liked_total={len(tracks)} library_total={len(library_tracks)} "
+        f"new={result.get('new_count', 0)} existing={result.get('existing_count', 0)}"
+    )
 
     return jsonify(
         {
@@ -389,7 +475,7 @@ def api_sync_liked():
                 else f"Синхронизация лайков завершена. Библиотека восстановлена: {seeded_count} треков."
             ),
             "result": result,
-            "tracks": db.list_tracks(bucket="liked", limit=2000, telegram_user_id=telegram_user_id),
+            "tracks": library_tracks or tracks[:2000],
             "library_new_tracks": library_new_tracks,
         }
     )
@@ -422,6 +508,9 @@ def api_import_yandex_playlist():
         else:
             imported += 1
 
+    library_tracks = _library_tracks_with_fallback(telegram_user_id, limit=2000)
+    _write_library_cache(telegram_user_id, library_tracks)
+
     return jsonify(
         {
             "ok": True,
@@ -430,7 +519,7 @@ def api_import_yandex_playlist():
             "total": len(result.get("tracks") or []),
             "imported": imported,
             "existing": existing,
-            "tracks": db.list_tracks(bucket="library", limit=2000, telegram_user_id=telegram_user_id),
+            "tracks": library_tracks,
         }
     )
 
