@@ -1,10 +1,10 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="ru">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>KSB Music Mini App</title>
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v=20260324c">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
@@ -12,7 +12,7 @@
     <header class="hero">
       <div class="hero__badge">Telegram Mini App</div>
       <h1>KSB Music</h1>
-      <p class="hero__lead">Поиск музыки, тексты песен, библиотека, очередь воспроизведения и быстрый доступ к лайкам из Яндекс.Музыки в одном интерфейсе.</p>
+      <p class="hero__lead">Поиск музыки, тексты песен, библиотека, скачанные треки, очередь воспроизведения и быстрый доступ к лайкам из Яндекс.Музыки в одном интерфейсе.</p>
       <div class="hero__meta">
         <span id="user-greeting">Привет</span>
         <span id="health-pill" class="pill pill--ghost">Проверяю сервисы...</span>
@@ -21,7 +21,7 @@
 
     <nav class="tabs">
       <button class="tab is-active" data-tab="search">Поиск</button>
-      <button class="tab" data-tab="liked">Мне понравилось</button>
+      <button class="tab" data-tab="downloads">Скачанные</button>
       <button class="tab" data-tab="lyrics">Тексты</button>
       <button class="tab" data-tab="library">Библиотека</button>
       <button class="tab" data-tab="player">Сейчас играет</button>
@@ -47,20 +47,17 @@
         <div id="search-results" class="result-grid"></div>
       </section>
 
-      <section id="tab-liked" class="panel">
+      <section id="tab-downloads" class="panel">
         <div class="panel__head">
-          <h2>Мне понравилось</h2>
-          <p>Синхронизируйте свои лайки из Яндекс.Музыки. Новые треки сразу добавляются в библиотеку и приложение попытается скачать их на устройство.</p>
+          <h2>Скачанные песни</h2>
+          <p>Здесь собраны треки, которые вы уже скачивали из библиотеки или после синхронизации лайков.</p>
         </div>
-        <div class="card action-card">
-          <div>
-            <strong>Синхронизация лайков</strong>
-            <p id="liked-status-text">Нажмите кнопку, чтобы обновить вашу коллекцию.</p>
-          </div>
-          <button id="liked-sync-button" class="primary-button" type="button">Синхронизировать</button>
-        </div>
-        <div id="liked-stats" class="stats-grid"></div>
-        <div id="liked-results" class="result-grid"></div>
+        <form id="downloads-search-form" class="card">
+          <input id="downloads-query" class="input" placeholder="Поиск по скачанным песням">
+          <button class="primary-button" type="submit">Найти среди скачанных</button>
+        </form>
+        <div id="downloads-summary" class="inline-note"></div>
+        <div id="downloads-results" class="result-grid"></div>
       </section>
 
       <section id="tab-lyrics" class="panel">
@@ -83,8 +80,16 @@
       <section id="tab-library" class="panel">
         <div class="panel__head">
           <h2>Библиотека</h2>
-          <p>Здесь хранятся треки, которые вы сохранили из поиска или получили из синхронизации лайков.</p>
+          <p>Здесь хранятся треки, которые вы сохранили из поиска или получили после синхронизации лайков.</p>
         </div>
+        <div class="card action-card">
+          <div>
+            <strong>Синхронизация лайков Яндекс.Музыки</strong>
+            <p id="library-sync-status">Нажмите кнопку, чтобы добавить лайки прямо в библиотеку.</p>
+          </div>
+          <button id="library-sync-button" class="primary-button" type="button">Синхронизировать библиотеку</button>
+        </div>
+        <div id="library-sync-stats" class="stats-grid"></div>
         <form id="library-search-form" class="card">
           <input id="library-query" class="input" placeholder="Поиск по библиотеке: название, артист или альбом">
           <button class="primary-button" type="submit">Найти в библиотеке</button>
@@ -96,14 +101,14 @@
       <section id="tab-player" class="panel">
         <div class="panel__head">
           <h2>Сейчас играет</h2>
-          <p>Встроенный плеер Mini App. Можно слушать сразу, ставить треки следующими и очищать очередь.</p>
+          <p>Встроенный плеер Mini App с очередью, перемешиванием и режимами повторения.</p>
         </div>
         <div class="player-screen card">
           <div class="player-screen__cover" id="player-cover"></div>
           <div class="player-screen__body">
             <div class="player-screen__eyebrow">Сейчас играет</div>
             <h3 id="player-title">Ничего не играет</h3>
-            <p id="player-artist">Выберите трек в поиске, лайках или библиотеке.</p>
+            <p id="player-artist">Выберите трек в поиске, скачанных песнях или библиотеке.</p>
             <div class="player-progress">
               <span id="player-current-time">0:00</span>
               <input id="player-seek" type="range" min="0" max="100" value="0">
@@ -113,6 +118,10 @@
               <button id="player-prev" class="ghost-button" type="button">Сначала</button>
               <button id="player-toggle" class="primary-button" type="button">Слушать</button>
               <button id="player-next" class="ghost-button" type="button">Следующий</button>
+            </div>
+            <div class="mode-bar">
+              <button id="shuffle-toggle" class="ghost-button mode-button" type="button">Перемешивание: выкл</button>
+              <button id="repeat-toggle" class="ghost-button mode-button" type="button">Повтор: выкл</button>
             </div>
           </div>
         </div>
@@ -169,6 +178,6 @@
     </article>
   </template>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260324c"></script>
 </body>
 </html>

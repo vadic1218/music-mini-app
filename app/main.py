@@ -1,10 +1,18 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 
 from flask import Flask, jsonify, request, send_from_directory
 
-from app.config import APP_NAME, APP_BASE_URL, DATA_DIR, DATABASE_PATH, STATIC_DIR, TELEGRAM_BOT_TOKEN, YANDEX_MUSIC_TOKEN
+from app.config import (
+    APP_BASE_URL,
+    APP_NAME,
+    DATA_DIR,
+    DATABASE_PATH,
+    STATIC_DIR,
+    TELEGRAM_BOT_TOKEN,
+    YANDEX_MUSIC_TOKEN,
+)
 from app.database import db
 from app.services.lyrics_service import get_lyrics
 from app.services.playback_service import resolve_stream_url
@@ -17,6 +25,7 @@ app = Flask(
     static_folder=str(STATIC_DIR),
     static_url_path="/static",
 )
+app.json.ensure_ascii = False
 
 db.init()
 
@@ -73,6 +82,7 @@ def api_search():
     limit = int(request.args.get("limit") or 20)
     if not query:
         return jsonify({"detail": "Нужен поисковый запрос."}), 400
+
     results = search_tracks(query, source=source, limit=limit)
     return jsonify({"query": query, "source": source, "total": len(results), "results": results})
 
@@ -87,6 +97,7 @@ def api_lyrics():
     payload, error = get_lyrics(query, source=source)
     if not payload:
         return jsonify({"query": query, "source": source, "found": False, "error": error})
+
     return jsonify({"query": query, "source": source, "found": True, "lyrics": payload})
 
 
@@ -95,7 +106,15 @@ def api_library():
     bucket = (request.args.get("bucket") or "library").strip()
     query = (request.args.get("query") or "").strip()
     limit = int(request.args.get("limit") or 2000)
-    return jsonify({"bucket": bucket, "query": query, "tracks": db.list_tracks(bucket=bucket, limit=limit, query=query)})
+    downloaded_only = (request.args.get("downloaded_only") or "").strip().lower() in {"1", "true", "yes"}
+    return jsonify(
+        {
+            "bucket": bucket,
+            "query": query,
+            "downloaded_only": downloaded_only,
+            "tracks": db.list_tracks(bucket=bucket, limit=limit, query=query, downloaded_only=downloaded_only),
+        }
+    )
 
 
 @app.post("/api/library/tracks")

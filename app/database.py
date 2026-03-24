@@ -256,17 +256,25 @@ class Database:
             "new_tracks": new_tracks,
         }
 
-    def list_tracks(self, bucket: str = "library", limit: int = 200, query: str | None = None) -> list[dict]:
+    def list_tracks(
+        self,
+        bucket: str = "library",
+        limit: int = 200,
+        query: str | None = None,
+        downloaded_only: bool = False,
+    ) -> list[dict]:
         normalized_query = (query or "").strip().lower()
         with self.connect() as conn:
+            downloaded_clause = " AND download_requested_at IS NOT NULL" if downloaded_only else ""
             if normalized_query:
                 like = f"%{normalized_query}%"
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT source, source_track_id, title, artists, album,
                            duration_seconds, cover_url, external_url, source_meta, bucket, updated_at, download_requested_at
                     FROM library_tracks
                     WHERE bucket = ? AND is_active = 1
+                      {downloaded_clause}
                       AND (
                           lower(title) LIKE ?
                           OR lower(artists) LIKE ?
@@ -279,11 +287,12 @@ class Database:
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT source, source_track_id, title, artists, album,
                            duration_seconds, cover_url, external_url, source_meta, bucket, updated_at, download_requested_at
                     FROM library_tracks
                     WHERE bucket = ? AND is_active = 1
+                    {downloaded_clause}
                     ORDER BY updated_at DESC, title COLLATE NOCASE ASC
                     LIMIT ?
                     """,

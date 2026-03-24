@@ -5,19 +5,41 @@
   health: null,
   currentTrack: null,
   queue: [],
-  likedTracks: [],
   libraryTracks: [],
+  downloadedTracks: [],
   activeTab: "search",
   playbackCache: {},
+  currentCollection: [],
+  shuffle: false,
+  repeatMode: "off", // off | one | all
 };
 
 const STORAGE_KEYS = {
   queue: "ksb-mini-app-queue",
   currentTrack: "ksb-mini-app-current-track",
+  shuffle: "ksb-mini-app-shuffle",
+  repeatMode: "ksb-mini-app-repeat-mode",
 };
 
 function $(selector) {
   return document.querySelector(selector);
+}
+
+function showFatalError(message) {
+  const healthPill = $("#health-pill");
+  if (healthPill) {
+    healthPill.textContent = message;
+  }
+
+  const statusCard = $("#status-card");
+  if (statusCard) {
+    statusCard.textContent = `Mini App остановился с ошибкой:\n${message}`;
+  }
+
+  const searchSummary = $("#search-summary");
+  if (searchSummary) {
+    searchSummary.textContent = message;
+  }
 }
 
 function formatDuration(seconds) {
@@ -32,8 +54,12 @@ function setStatusText(message, target = "search") {
     $("#library-summary").textContent = message;
     return;
   }
-  if (target === "liked" && $("#liked-status-text")) {
-    $("#liked-status-text").textContent = message;
+  if (target === "downloads" && $("#downloads-summary")) {
+    $("#downloads-summary").textContent = message;
+    return;
+  }
+  if (target === "library-sync" && $("#library-sync-status")) {
+    $("#library-sync-status").textContent = message;
     return;
   }
   if ($("#search-summary")) {
@@ -57,6 +83,8 @@ function persistPlayerState() {
     } else {
       localStorage.removeItem(STORAGE_KEYS.currentTrack);
     }
+    localStorage.setItem(STORAGE_KEYS.shuffle, JSON.stringify(state.shuffle));
+    localStorage.setItem(STORAGE_KEYS.repeatMode, state.repeatMode);
   } catch (error) {
     console.warn(error);
   }
@@ -68,10 +96,23 @@ function restorePlayerState() {
     state.queue = queueRaw ? JSON.parse(queueRaw) : [];
     const currentRaw = localStorage.getItem(STORAGE_KEYS.currentTrack);
     state.currentTrack = currentRaw ? JSON.parse(currentRaw) : null;
+    state.shuffle = JSON.parse(localStorage.getItem(STORAGE_KEYS.shuffle) || "false");
+    state.repeatMode = localStorage.getItem(STORAGE_KEYS.repeatMode) || "off";
   } catch (error) {
     state.queue = [];
     state.currentTrack = null;
+    state.shuffle = false;
+    state.repeatMode = "off";
   }
+}
+
+function shuffleArray(items) {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
 }
 
 async function request(url, options = {}) {
@@ -96,14 +137,10 @@ function switchTab(tabName) {
   });
 
   if (tabName === "library") {
-    loadLibrary($("#library-query")?.value?.trim() || "").catch((error) => {
-      setStatusText(error.message, "library");
-    });
+    loadLibrary($("#library-query")?.value?.trim() || "").catch((error) => setStatusText(error.message, "library"));
   }
-  if (tabName === "liked") {
-    loadLiked().catch((error) => {
-      setStatusText(error.message, "liked");
-    });
+  if (tabName === "downloads") {
+    loadDownloads($("#downloads-query")?.value?.trim() || "").catch((error) => setStatusText(error.message, "downloads"));
   }
 }
 
@@ -123,6 +160,14 @@ function downloadedLabel(track) {
   return isTrackDownloaded(track) ? "скачан" : "не скачан";
 }
 
+function updateModeButtons() {
+  $("#shuffle-toggle").textContent = `Перемешивание: ${state.shuffle ? "вкл" : "выкл"}`;
+  const repeatLabel = state.repeatMode === "one" ? "трек" : state.repeatMode === "all" ? "очередь" : "выкл";
+  $("#repeat-toggle").textContent = `Повтор: ${repeatLabel}`;
+  $("#shuffle-toggle").classList.toggle("is-active", state.shuffle);
+  $("#repeat-toggle").classList.toggle("is-active", state.repeatMode !== "off");
+}
+
 function updatePlayerUi() {
   const audio = $("#audio-player");
   const track = state.currentTrack;
@@ -131,7 +176,7 @@ function updatePlayerUi() {
   $("#player-title").textContent = hasTrack ? track.title : "Ничего не играет";
   $("#player-artist").textContent = hasTrack
     ? (track.artists || "Неизвестный артист")
-    : "Выберите трек в поиске, лайках или библиотеке.";
+    : "Выберите трек в поиске, скачанных песнях или библиотеке.";
   $("#player-current-time").textContent = formatDuration(audio.currentTime || 0);
   $("#player-duration").textContent = formatDuration(hasTrack ? (audio.duration || track.duration_seconds || 0) : 0);
   $("#player-seek").value = hasTrack && audio.duration ? Math.round((audio.currentTime / audio.duration) * 100) : 0;
@@ -155,6 +200,7 @@ function updatePlayerUi() {
   $("#player-dock-title").textContent = hasTrack ? track.title : "Ничего не играет";
   $("#player-dock-subtitle").textContent = hasTrack ? (track.artists || "Неизвестный артист") : "Выберите трек";
   $("#player-dock-toggle").textContent = playing ? "⏸" : "▶";
+  updateModeButtons();
   persistPlayerState();
 }
 
@@ -162,7 +208,7 @@ function renderQueue() {
   const container = $("#queue-list");
   container.innerHTML = "";
   if (!state.queue.length) {
-    container.innerHTML = '<div class="lyrics-card empty-state">Очередь пуста. Добавьте треки кнопкой "Слушать следующим".</div>';
+    container.innerHTML = '<div class="lyrics-card empty-state">Очередь пуста. Добавьте треки кнопкой "Слушать следующим" или запустите плейлист из библиотеки.</div>';
     persistPlayerState();
     return;
   }
@@ -206,16 +252,14 @@ async function fetchPlaybackUrl(track) {
 }
 
 function prefetchPlaybackUrls(tracks) {
-  tracks.slice(0, 6).forEach((track) => {
+  tracks.slice(0, 8).forEach((track) => {
     const key = trackKey(track);
     if (state.playbackCache[key]) {
       return;
     }
-    requestPlaybackUrl(track)
-      .then((streamUrl) => {
-        state.playbackCache[key] = streamUrl;
-      })
-      .catch(() => {});
+    requestPlaybackUrl(track).then((streamUrl) => {
+      state.playbackCache[key] = streamUrl;
+    }).catch(() => {});
   });
 }
 
@@ -236,11 +280,11 @@ async function markTrackDownloaded(track, bucket = "library") {
         bucket,
       }),
     });
+    track.download_requested_at = new Date().toISOString();
     const mirror = getLibraryMirror(track);
     if (mirror) {
-      mirror.download_requested_at = new Date().toISOString();
+      mirror.download_requested_at = track.download_requested_at;
     }
-    track.download_requested_at = new Date().toISOString();
   } catch (error) {
     console.warn(error);
   }
@@ -270,18 +314,21 @@ async function autoDownloadTracks(tracks) {
   }
 }
 
-function buildAutoQueue(track, collectionTracks) {
-  if (!Array.isArray(collectionTracks) || !collectionTracks.length) {
-    return;
-  }
+function buildQueueFromCollection(track, collectionTracks) {
+  state.currentCollection = collectionTracks || [];
   const current = trackKey(track);
-  const currentIndex = collectionTracks.findIndex((item) => trackKey(item) === current);
+  const currentIndex = state.currentCollection.findIndex((item) => trackKey(item) === current);
   if (currentIndex === -1) {
+    state.queue = [];
     return;
   }
-  const remainder = collectionTracks.slice(currentIndex + 1).filter((item) => trackKey(item) !== current);
+  let remainder = state.currentCollection.filter((item) => trackKey(item) !== current);
+  if (!state.shuffle) {
+    remainder = state.currentCollection.slice(currentIndex + 1).concat(state.currentCollection.slice(0, currentIndex));
+  } else {
+    remainder = shuffleArray(remainder);
+  }
   state.queue = remainder;
-  renderQueue();
 }
 
 async function playTrack(track) {
@@ -296,7 +343,8 @@ async function playTrack(track) {
 }
 
 async function startCollectionPlayback(track, collectionTracks) {
-  buildAutoQueue(track, collectionTracks);
+  buildQueueFromCollection(track, collectionTracks);
+  renderQueue();
   await playTrack(track);
 }
 
@@ -308,7 +356,6 @@ function enqueueTrack(track, { next = false } = {}) {
     updatePlayerUi();
     return;
   }
-
   if (next) {
     state.queue.unshift(track);
   } else {
@@ -320,6 +367,24 @@ function enqueueTrack(track, { next = false } = {}) {
 }
 
 async function playNextTrack() {
+  if (state.repeatMode === "one" && state.currentTrack) {
+    const audio = $("#audio-player");
+    audio.currentTime = 0;
+    await audio.play();
+    updatePlayerUi();
+    return;
+  }
+
+  if (!state.queue.length && state.repeatMode === "all" && state.currentCollection.length && state.currentTrack) {
+    buildQueueFromCollection(state.currentTrack, state.currentCollection);
+    if (state.queue.length) {
+      const first = state.queue.shift();
+      renderQueue();
+      await playTrack(first);
+      return;
+    }
+  }
+
   const nextTrack = state.queue.shift();
   renderQueue();
   if (!nextTrack) {
@@ -340,16 +405,20 @@ function playPreviousTrack() {
   updatePlayerUi();
 }
 
+function renderTrackMeta(track) {
+  return [
+    track.album || null,
+    track.duration_seconds ? formatDuration(track.duration_seconds) : null,
+    downloadedLabel(track),
+  ].filter(Boolean).join(" • ");
+}
+
 function createTrackCard(track, { saveButton = false, openLyricsButton = false, collectionTracks = [] } = {}) {
   const template = document.getElementById("track-card-template");
   const node = template.content.firstElementChild.cloneNode(true);
   node.querySelector(".track-card__title").textContent = track.title;
   node.querySelector(".track-card__artist").textContent = track.artists || "Неизвестный артист";
-  node.querySelector(".track-card__meta").textContent = [
-    track.album || null,
-    track.duration_seconds ? formatDuration(track.duration_seconds) : null,
-    downloadedLabel(track),
-  ].filter(Boolean).join(" • ");
+  node.querySelector(".track-card__meta").textContent = renderTrackMeta(track);
   node.querySelector(".track-card__source").textContent = track.source;
 
   const cover = node.querySelector(".track-card__cover");
@@ -385,11 +454,8 @@ function createTrackCard(track, { saveButton = false, openLyricsButton = false, 
     try {
       await triggerTrackDownload(track, track.bucket || "library");
       download.textContent = "Скачать заново";
-      node.querySelector(".track-card__meta").textContent = [
-        track.album || null,
-        track.duration_seconds ? formatDuration(track.duration_seconds) : null,
-        downloadedLabel(track),
-      ].filter(Boolean).join(" • ");
+      node.querySelector(".track-card__meta").textContent = renderTrackMeta(track);
+      await loadDownloads($("#downloads-query")?.value?.trim() || "");
     } catch (error) {
       setStatusText(error.message);
     }
@@ -418,18 +484,8 @@ function createTrackCard(track, { saveButton = false, openLyricsButton = false, 
         body: JSON.stringify({ ...track, bucket: "library" }),
       });
       await loadLibrary($("#library-query")?.value?.trim() || "");
-      try {
-        await triggerTrackDownload(track, "library");
-      } catch (error) {
-        console.warn(error);
-      }
       save.textContent = "Уже в библиотеке";
       save.disabled = true;
-      node.querySelector(".track-card__meta").textContent = [
-        track.album || null,
-        track.duration_seconds ? formatDuration(track.duration_seconds) : null,
-        downloadedLabel(track),
-      ].filter(Boolean).join(" • ");
     });
     actions.appendChild(save);
   }
@@ -473,6 +529,7 @@ async function bootstrap() {
   restorePlayerState();
   await loadHealth();
   await loadLibrary("");
+  await loadDownloads("");
   renderQueue();
   updatePlayerUi();
 }
@@ -532,32 +589,30 @@ async function loadLibrary(query = "") {
   $("#library-summary").textContent = normalizedQuery ? `Найдено в библиотеке: ${payload.tracks.length}` : `Всего в библиотеке: ${payload.tracks.length}`;
   container.innerHTML = "";
   if (!payload.tracks.length) {
-    container.innerHTML = '<div class="lyrics-card empty-state">В библиотеке пока ничего не найдено.</div>';
+    container.innerHTML = '<div class="lyrics-card empty-state">Библиотека пока пустая. Запустите синхронизацию или сохраните трек из поиска.</div>';
     return;
   }
   prefetchPlaybackUrls(payload.tracks);
   payload.tracks.forEach((track) => container.appendChild(createTrackCard(track, { openLyricsButton: true, collectionTracks: payload.tracks })));
 }
 
-async function loadLiked() {
-  const payload = await request("/api/library?bucket=liked&limit=2000");
-  state.likedTracks = payload.tracks;
-  renderLikedTracks(payload.tracks);
-}
-
-function renderLikedTracks(tracks) {
-  const container = $("#liked-results");
+async function loadDownloads(query = "") {
+  const normalizedQuery = (query || "").trim();
+  const payload = await request(`/api/library?bucket=library&downloaded_only=1&limit=2000&query=${encodeURIComponent(normalizedQuery)}`);
+  state.downloadedTracks = payload.tracks;
+  const container = $("#downloads-results");
+  $("#downloads-summary").textContent = normalizedQuery ? `Найдено среди скачанных: ${payload.tracks.length}` : `Скачанных треков: ${payload.tracks.length}`;
   container.innerHTML = "";
-  if (!tracks.length) {
-    container.innerHTML = '<div class="lyrics-card empty-state">Лайки еще не синхронизированы.</div>';
+  if (!payload.tracks.length) {
+    container.innerHTML = '<div class="lyrics-card empty-state">Скачанных треков пока нет.</div>';
     return;
   }
-  prefetchPlaybackUrls(tracks);
-  tracks.forEach((track) => container.appendChild(createTrackCard(track, { openLyricsButton: true, collectionTracks: tracks })));
+  prefetchPlaybackUrls(payload.tracks);
+  payload.tracks.forEach((track) => container.appendChild(createTrackCard(track, { openLyricsButton: true, collectionTracks: payload.tracks })));
 }
 
-function renderLikedStats(result) {
-  const stats = $("#liked-stats");
+function renderLibrarySyncStats(result) {
+  const stats = $("#library-sync-stats");
   const items = [
     ["Всего", result.total],
     ["Новых", result.new_count],
@@ -573,117 +628,146 @@ function renderLikedStats(result) {
   });
 }
 
-async function syncLiked() {
-  setStatusText("Синхронизация запущена...", "liked");
+async function syncLibraryFromLiked() {
+  setStatusText("Синхронизация библиотеки запущена...", "library-sync");
   const payload = await request("/api/liked/sync", { method: "POST" });
-  setStatusText(payload.message, "liked");
+  setStatusText(payload.message, "library-sync");
   if (payload.result) {
-    renderLikedStats(payload.result);
+    renderLibrarySyncStats(payload.result);
   }
-  state.likedTracks = payload.tracks || [];
   await loadLibrary($("#library-query")?.value?.trim() || "");
-  renderLikedTracks(state.likedTracks);
+  await loadDownloads($("#downloads-query")?.value?.trim() || "");
   if (payload.library_new_tracks?.length) {
-    setStatusText(`${payload.message} Новых треков в библиотеке: ${payload.library_new_tracks.length}.`, "liked");
+    setStatusText(`${payload.message} Новых треков добавлено: ${payload.library_new_tracks.length}.`, "library-sync");
     autoDownloadTracks(payload.library_new_tracks).catch((error) => console.warn(error));
   }
   await loadHealth();
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  document.querySelectorAll(".tab").forEach((tab) => {
-    tab.addEventListener("click", () => switchTab(tab.dataset.tab));
-  });
-
-  document.querySelectorAll("#search-source .segmented__item").forEach((button) => {
-    button.addEventListener("click", () => setActiveSegment("search-source", button.dataset.value, "searchSource"));
-  });
-
-  document.querySelectorAll("#lyrics-source .segmented__item").forEach((button) => {
-    button.addEventListener("click", () => setActiveSegment("lyrics-source", button.dataset.value, "lyricsSource"));
-  });
-
-  $("#search-form").addEventListener("submit", (event) => {
-    performSearch(event).catch((error) => setStatusText(error.message));
-  });
-
-  $("#lyrics-form").addEventListener("submit", (event) => {
-    performLyricsSearch(event).catch((error) => {
-      $("#lyrics-result").textContent = error.message;
+  try {
+    document.querySelectorAll(".tab").forEach((tab) => {
+      tab.addEventListener("click", () => switchTab(tab.dataset.tab));
     });
-  });
 
-  $("#library-search-form").addEventListener("submit", (event) => {
-    event.preventDefault();
-    loadLibrary($("#library-query").value.trim()).catch((error) => setStatusText(error.message, "library"));
-  });
+    document.querySelectorAll("#search-source .segmented__item").forEach((button) => {
+      button.addEventListener("click", () => setActiveSegment("search-source", button.dataset.value, "searchSource"));
+    });
 
-  $("#liked-sync-button").addEventListener("click", () => {
-    syncLiked().catch((error) => setStatusText(error.message, "liked"));
-  });
+    document.querySelectorAll("#lyrics-source .segmented__item").forEach((button) => {
+      button.addEventListener("click", () => setActiveSegment("lyrics-source", button.dataset.value, "lyricsSource"));
+    });
 
-  $("#player-toggle").addEventListener("click", async () => {
-    const audio = $("#audio-player");
-    if (!state.currentTrack && state.queue.length) {
-      await playNextTrack();
-      return;
-    }
-    if (!state.currentTrack) {
-      switchTab("search");
-      return;
-    }
-    if (audio.paused) {
-      await audio.play();
-    } else {
-      audio.pause();
-    }
-    updatePlayerUi();
-  });
+    $("#search-form").addEventListener("submit", (event) => {
+      performSearch(event).catch((error) => setStatusText(error.message));
+    });
 
-  $("#player-prev").addEventListener("click", () => {
-    playPreviousTrack();
-  });
+    $("#lyrics-form").addEventListener("submit", (event) => {
+      performLyricsSearch(event).catch((error) => {
+        $("#lyrics-result").textContent = error.message;
+      });
+    });
 
-  $("#player-next").addEventListener("click", () => {
-    playNextTrack().catch((error) => setStatusText(error.message));
-  });
+    $("#library-search-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      loadLibrary($("#library-query").value.trim()).catch((error) => setStatusText(error.message, "library"));
+    });
 
-  $("#queue-clear").addEventListener("click", () => {
-    state.queue = [];
-    renderQueue();
-    updatePlayerUi();
-  });
+    $("#downloads-search-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      loadDownloads($("#downloads-query").value.trim()).catch((error) => setStatusText(error.message, "downloads"));
+    });
 
-  $("#player-dock-open").addEventListener("click", () => {
-    switchTab("player");
-  });
+    $("#library-sync-button").addEventListener("click", () => {
+      syncLibraryFromLiked().catch((error) => setStatusText(error.message, "library-sync"));
+    });
 
-  $("#player-dock-toggle").addEventListener("click", () => {
-    $("#player-toggle").click();
-  });
+    $("#shuffle-toggle").addEventListener("click", () => {
+      state.shuffle = !state.shuffle;
+      updateModeButtons();
+      persistPlayerState();
+    });
 
-  $("#player-dock-next").addEventListener("click", () => {
-    $("#player-next").click();
-  });
+    $("#repeat-toggle").addEventListener("click", () => {
+      state.repeatMode = state.repeatMode === "off" ? "all" : state.repeatMode === "all" ? "one" : "off";
+      updateModeButtons();
+      persistPlayerState();
+    });
 
-  $("#player-seek").addEventListener("input", (event) => {
-    const audio = $("#audio-player");
-    if (!audio.duration) {
-      return;
-    }
-    audio.currentTime = audio.duration * (Number(event.target.value || 0) / 100);
-    updatePlayerUi();
-  });
+    $("#player-toggle").addEventListener("click", async () => {
+      const audio = $("#audio-player");
+      if (!state.currentTrack && state.queue.length) {
+        await playNextTrack();
+        return;
+      }
+      if (!state.currentTrack) {
+        switchTab("search");
+        return;
+      }
+      if (audio.paused) {
+        await audio.play();
+      } else {
+        audio.pause();
+      }
+      updatePlayerUi();
+    });
 
-  $("#audio-player").addEventListener("timeupdate", updatePlayerUi);
-  $("#audio-player").addEventListener("loadedmetadata", updatePlayerUi);
-  $("#audio-player").addEventListener("play", updatePlayerUi);
-  $("#audio-player").addEventListener("pause", updatePlayerUi);
-  $("#audio-player").addEventListener("ended", () => {
-    playNextTrack().catch((error) => setStatusText(error.message));
-  });
+    $("#player-prev").addEventListener("click", () => {
+      playPreviousTrack();
+    });
 
-  bootstrap().catch((error) => {
-    $("#health-pill").textContent = error.message;
-  });
+    $("#player-next").addEventListener("click", () => {
+      playNextTrack().catch((error) => setStatusText(error.message));
+    });
+
+    $("#queue-clear").addEventListener("click", () => {
+      state.queue = [];
+      renderQueue();
+      updatePlayerUi();
+    });
+
+    $("#player-dock-open").addEventListener("click", () => {
+      switchTab("player");
+    });
+
+    $("#player-dock-toggle").addEventListener("click", () => {
+      $("#player-toggle").click();
+    });
+
+    $("#player-dock-next").addEventListener("click", () => {
+      $("#player-next").click();
+    });
+
+    $("#player-seek").addEventListener("input", (event) => {
+      const audio = $("#audio-player");
+      if (!audio.duration) {
+        return;
+      }
+      audio.currentTime = audio.duration * (Number(event.target.value || 0) / 100);
+      updatePlayerUi();
+    });
+
+    $("#audio-player").addEventListener("timeupdate", updatePlayerUi);
+    $("#audio-player").addEventListener("loadedmetadata", updatePlayerUi);
+    $("#audio-player").addEventListener("play", updatePlayerUi);
+    $("#audio-player").addEventListener("pause", updatePlayerUi);
+    $("#audio-player").addEventListener("ended", () => {
+      playNextTrack().catch((error) => setStatusText(error.message));
+    });
+
+    bootstrap().catch((error) => {
+      showFatalError(error.message);
+    });
+  } catch (error) {
+    showFatalError(error.message || "Не удалось запустить интерфейс.");
+  }
+});
+
+window.addEventListener("error", (event) => {
+  showFatalError(event.message || "Ошибка JavaScript.");
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason?.message || event.reason || "Необработанная ошибка.";
+  showFatalError(String(reason));
 });
