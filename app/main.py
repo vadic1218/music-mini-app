@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
@@ -46,6 +48,34 @@ def _extract_telegram_user_id(payload: dict | None = None) -> int:
     return 0
 
 
+def _liked_cache_path(telegram_user_id: int) -> Path:
+    return DATA_DIR / f"liked_cache_{telegram_user_id}.json"
+
+
+def _write_liked_cache(telegram_user_id: int, tracks: list[dict]) -> None:
+    if telegram_user_id <= 0:
+        return
+    try:
+        _liked_cache_path(telegram_user_id).write_text(
+            json.dumps(tracks, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _read_liked_cache(telegram_user_id: int) -> list[dict]:
+    if telegram_user_id <= 0:
+        return []
+    path = _liked_cache_path(telegram_user_id)
+    if not path.exists():
+        return []
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
 def _seed_library_from_liked_if_empty(telegram_user_id: int) -> int:
     library_tracks = db.list_tracks(bucket="library", limit=1, telegram_user_id=telegram_user_id)
     if library_tracks:
@@ -74,8 +104,29 @@ def _library_tracks_with_fallback(
         downloaded_only=downloaded_only,
         telegram_user_id=telegram_user_id,
     )
-    if tracks or downloaded_only:
-        return tracks
+    liked_tracks = db.list_tracks(
+        bucket="liked",
+        limit=max(limit, 5000),
+        query=query,
+        downloaded_only=downloaded_only,
+        telegram_user_id=telegram_user_id,
+    )
+
+    # Library in the Mini App should always reflect both explicitly saved tracks
+    # and synchronized liked tracks for the same Telegram user.
+    merged: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for track in tracks + liked_tracks:
+        key = (str(track.get("source") or ""), str(track.get("source_track_id") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(track)
+        if len(merged) >= limit:
+            break
+
+    if merged:
+        return merged
 
     if not query:
         _seed_library_from_liked_if_empty(telegram_user_id)
@@ -88,18 +139,35 @@ def _library_tracks_with_fallback(
         )
         if tracks:
             return tracks
-
-    liked_tracks = db.list_tracks(
-        bucket="liked",
-        limit=max(limit, 5000),
-        query=query,
-        downloaded_only=False,
-        telegram_user_id=telegram_user_id,
-    )
     if liked_tracks:
         for track in liked_tracks:
             db.save_track(track, bucket="library", telegram_user_id=telegram_user_id)
         return liked_tracks[:limit]
+
+    cached_tracks = _read_liked_cache(telegram_user_id)
+    if cached_tracks:
+        filtered_tracks: list[dict] = []
+        query_cf = (query or "").strip().casefold()
+        for track in cached_tracks:
+            if downloaded_only and not track.get("download_requested_at"):
+                continue
+            if query_cf:
+                haystack = " ".join(
+                    [
+                        str(track.get("title") or ""),
+                        str(track.get("artists") or ""),
+                        str(track.get("album") or ""),
+                    ]
+                ).casefold()
+                if query_cf not in haystack:
+                    continue
+            db.save_track(track, bucket="liked", telegram_user_id=telegram_user_id)
+            db.save_track(track, bucket="library", telegram_user_id=telegram_user_id)
+            filtered_tracks.append(track)
+            if len(filtered_tracks) >= limit:
+                break
+        if filtered_tracks:
+            return filtered_tracks
 
     return tracks
 
@@ -234,12 +302,7 @@ def api_save_track():
         return jsonify({"detail": "Недостаточно данных для сохранения трека."}), 400
 
     db.save_track(payload, bucket=bucket, telegram_user_id=telegram_user_id)
-    saved_track = db.list_tracks(
-        bucket=bucket,
-        limit=1,
-        telegram_user_id=telegram_user_id,
-    )
-    return jsonify({"ok": True, "track": saved_track[0] if saved_track else payload})
+    return jsonify({"ok": True, "track": payload})
 
 
 @app.post("/api/library/mark-downloaded")
@@ -302,6 +365,7 @@ def api_sync_liked():
         )
 
     result = db.sync_bucket(tracks, bucket="liked", telegram_user_id=telegram_user_id)
+    _write_liked_cache(telegram_user_id, tracks)
     library_new_tracks: list[dict] = []
     for track in tracks:
         existed = db.has_track(
