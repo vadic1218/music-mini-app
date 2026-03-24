@@ -56,6 +56,7 @@ class Database:
                     source_meta TEXT,
                     bucket TEXT NOT NULL DEFAULT 'library',
                     is_active INTEGER NOT NULL DEFAULT 1,
+                    download_requested_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (source, source_track_id, bucket)
@@ -82,6 +83,8 @@ class Database:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(library_tracks)").fetchall()}
             if "source_meta" not in columns:
                 conn.execute("ALTER TABLE library_tracks ADD COLUMN source_meta TEXT")
+            if "download_requested_at" not in columns:
+                conn.execute("ALTER TABLE library_tracks ADD COLUMN download_requested_at TEXT")
         self._initialized = True
 
     def upsert_user(self, user_payload: dict) -> None:
@@ -119,9 +122,9 @@ class Database:
                 INSERT INTO library_tracks (
                     source, source_track_id, title, artists, album,
                     duration_seconds, cover_url, external_url, source_meta, bucket,
-                    is_active, created_at, updated_at
+                    is_active, download_requested_at, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                 ON CONFLICT(source, source_track_id, bucket) DO UPDATE SET
                     title = excluded.title,
                     artists = excluded.artists,
@@ -131,6 +134,7 @@ class Database:
                     external_url = excluded.external_url,
                     source_meta = excluded.source_meta,
                     is_active = 1,
+                    download_requested_at = COALESCE(excluded.download_requested_at, library_tracks.download_requested_at),
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -144,6 +148,7 @@ class Database:
                     track.get("external_url"),
                     json.dumps(track.get("source_meta") or {}, ensure_ascii=False),
                     bucket,
+                    track.get("download_requested_at"),
                     now,
                     now,
                 ),
@@ -201,9 +206,9 @@ class Database:
                     INSERT INTO library_tracks (
                         source, source_track_id, title, artists, album,
                         duration_seconds, cover_url, external_url, source_meta, bucket,
-                        is_active, created_at, updated_at
+                        is_active, download_requested_at, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                     ON CONFLICT(source, source_track_id, bucket) DO UPDATE SET
                         title = excluded.title,
                         artists = excluded.artists,
@@ -213,6 +218,7 @@ class Database:
                         external_url = excluded.external_url,
                         source_meta = excluded.source_meta,
                         is_active = 1,
+                        download_requested_at = COALESCE(excluded.download_requested_at, library_tracks.download_requested_at),
                         updated_at = excluded.updated_at
                     """,
                     (
@@ -226,6 +232,7 @@ class Database:
                         track.get("external_url"),
                         json.dumps(track.get("source_meta") or {}, ensure_ascii=False),
                         bucket,
+                        track.get("download_requested_at"),
                         now,
                         now,
                     ),
@@ -257,7 +264,7 @@ class Database:
                 rows = conn.execute(
                     """
                     SELECT source, source_track_id, title, artists, album,
-                           duration_seconds, cover_url, external_url, source_meta, bucket, updated_at
+                           duration_seconds, cover_url, external_url, source_meta, bucket, updated_at, download_requested_at
                     FROM library_tracks
                     WHERE bucket = ? AND is_active = 1
                       AND (
@@ -274,7 +281,7 @@ class Database:
                 rows = conn.execute(
                     """
                     SELECT source, source_track_id, title, artists, album,
-                           duration_seconds, cover_url, external_url, source_meta, bucket, updated_at
+                           duration_seconds, cover_url, external_url, source_meta, bucket, updated_at, download_requested_at
                     FROM library_tracks
                     WHERE bucket = ? AND is_active = 1
                     ORDER BY updated_at DESC, title COLLATE NOCASE ASC
@@ -292,6 +299,17 @@ class Database:
                 item["source_meta"] = {}
             tracks.append(item)
         return tracks
+
+    def mark_download_requested(self, source: str, source_track_id: str | int, bucket: str = "library") -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                UPDATE library_tracks
+                SET download_requested_at = ?, updated_at = ?
+                WHERE source = ? AND source_track_id = ? AND bucket = ? AND is_active = 1
+                """,
+                (utcnow(), utcnow(), source, str(source_track_id), bucket),
+            )
 
     def stats(self) -> dict:
         with self.connect() as conn:

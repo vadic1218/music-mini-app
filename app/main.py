@@ -94,7 +94,7 @@ def api_lyrics():
 def api_library():
     bucket = (request.args.get("bucket") or "library").strip()
     query = (request.args.get("query") or "").strip()
-    limit = int(request.args.get("limit") or 200)
+    limit = int(request.args.get("limit") or 2000)
     return jsonify({"bucket": bucket, "query": query, "tracks": db.list_tracks(bucket=bucket, limit=limit, query=query)})
 
 
@@ -107,6 +107,19 @@ def api_save_track():
         return jsonify({"detail": "Недостаточно данных для сохранения трека."}), 400
 
     db.save_track(payload, bucket=bucket)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/library/mark-downloaded")
+def api_mark_downloaded():
+    payload = request.get_json(silent=True) or {}
+    source = payload.get("source")
+    source_track_id = payload.get("source_track_id")
+    bucket = payload.get("bucket", "library")
+    if not source or not source_track_id:
+        return jsonify({"detail": "Недостаточно данных для отметки скачивания."}), 400
+
+    db.mark_download_requested(source, source_track_id, bucket=bucket)
     return jsonify({"ok": True})
 
 
@@ -166,7 +179,7 @@ def api_sync_liked():
             "ok": True,
             "message": "Синхронизация лайков завершена.",
             "result": result,
-            "tracks": db.list_tracks(bucket="liked", limit=200),
+            "tracks": db.list_tracks(bucket="liked", limit=2000),
             "library_new_tracks": library_new_tracks,
         }
     )

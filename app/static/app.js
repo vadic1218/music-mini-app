@@ -8,6 +8,7 @@
   likedTracks: [],
   libraryTracks: [],
   activeTab: "search",
+  playbackCache: {},
 };
 
 const STORAGE_KEYS = {
@@ -110,6 +111,18 @@ function trackKey(track) {
   return `${track.source || "unknown"}:${track.source_track_id || track.external_url || track.title || "track"}`;
 }
 
+function getLibraryMirror(track) {
+  return state.libraryTracks.find((item) => trackKey(item) === trackKey(track)) || null;
+}
+
+function isTrackDownloaded(track) {
+  return Boolean(track.download_requested_at || getLibraryMirror(track)?.download_requested_at);
+}
+
+function downloadedLabel(track) {
+  return isTrackDownloaded(track) ? "скачан" : "не скачан";
+}
+
 function updatePlayerUi() {
   const audio = $("#audio-player");
   const track = state.currentTrack;
@@ -174,12 +187,36 @@ function renderQueue() {
   persistPlayerState();
 }
 
-async function fetchPlaybackUrl(track) {
+async function requestPlaybackUrl(track) {
   const payload = await request("/api/playback-url", {
     method: "POST",
     body: JSON.stringify(track),
   });
   return payload.stream_url;
+}
+
+async function fetchPlaybackUrl(track) {
+  const key = trackKey(track);
+  if (state.playbackCache[key]) {
+    return state.playbackCache[key];
+  }
+  const streamUrl = await requestPlaybackUrl(track);
+  state.playbackCache[key] = streamUrl;
+  return streamUrl;
+}
+
+function prefetchPlaybackUrls(tracks) {
+  tracks.slice(0, 6).forEach((track) => {
+    const key = trackKey(track);
+    if (state.playbackCache[key]) {
+      return;
+    }
+    requestPlaybackUrl(track)
+      .then((streamUrl) => {
+        state.playbackCache[key] = streamUrl;
+      })
+      .catch(() => {});
+  });
 }
 
 async function fetchDownloadPayload(track) {
@@ -189,7 +226,27 @@ async function fetchDownloadPayload(track) {
   });
 }
 
-async function triggerTrackDownload(track) {
+async function markTrackDownloaded(track, bucket = "library") {
+  try {
+    await request("/api/library/mark-downloaded", {
+      method: "POST",
+      body: JSON.stringify({
+        source: track.source,
+        source_track_id: track.source_track_id,
+        bucket,
+      }),
+    });
+    const mirror = getLibraryMirror(track);
+    if (mirror) {
+      mirror.download_requested_at = new Date().toISOString();
+    }
+    track.download_requested_at = new Date().toISOString();
+  } catch (error) {
+    console.warn(error);
+  }
+}
+
+async function triggerTrackDownload(track, bucket = "library") {
   const payload = await fetchDownloadPayload(track);
   const anchor = document.createElement("a");
   anchor.href = payload.download_url;
@@ -199,17 +256,32 @@ async function triggerTrackDownload(track) {
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
+  await markTrackDownloaded(track, bucket);
 }
 
 async function autoDownloadTracks(tracks) {
   for (const track of tracks) {
     try {
-      await triggerTrackDownload(track);
+      await triggerTrackDownload(track, "library");
       await new Promise((resolve) => setTimeout(resolve, 250));
     } catch (error) {
       console.warn(error);
     }
   }
+}
+
+function buildAutoQueue(track, collectionTracks) {
+  if (!Array.isArray(collectionTracks) || !collectionTracks.length) {
+    return;
+  }
+  const current = trackKey(track);
+  const currentIndex = collectionTracks.findIndex((item) => trackKey(item) === current);
+  if (currentIndex === -1) {
+    return;
+  }
+  const remainder = collectionTracks.slice(currentIndex + 1).filter((item) => trackKey(item) !== current);
+  state.queue = remainder;
+  renderQueue();
 }
 
 async function playTrack(track) {
@@ -221,6 +293,11 @@ async function playTrack(track) {
   await audio.play();
   switchTab("player");
   updatePlayerUi();
+}
+
+async function startCollectionPlayback(track, collectionTracks) {
+  buildAutoQueue(track, collectionTracks);
+  await playTrack(track);
 }
 
 function enqueueTrack(track, { next = false } = {}) {
@@ -263,7 +340,7 @@ function playPreviousTrack() {
   updatePlayerUi();
 }
 
-function createTrackCard(track, { saveButton = false, openLyricsButton = false } = {}) {
+function createTrackCard(track, { saveButton = false, openLyricsButton = false, collectionTracks = [] } = {}) {
   const template = document.getElementById("track-card-template");
   const node = template.content.firstElementChild.cloneNode(true);
   node.querySelector(".track-card__title").textContent = track.title;
@@ -271,6 +348,7 @@ function createTrackCard(track, { saveButton = false, openLyricsButton = false }
   node.querySelector(".track-card__meta").textContent = [
     track.album || null,
     track.duration_seconds ? formatDuration(track.duration_seconds) : null,
+    downloadedLabel(track),
   ].filter(Boolean).join(" • ");
   node.querySelector(".track-card__source").textContent = track.source;
 
@@ -288,7 +366,7 @@ function createTrackCard(track, { saveButton = false, openLyricsButton = false }
   play.className = "primary-button";
   play.textContent = "Слушать";
   play.addEventListener("click", () => {
-    playTrack(track).catch((error) => setStatusText(error.message));
+    startCollectionPlayback(track, collectionTracks).catch((error) => setStatusText(error.message));
   });
   actions.appendChild(play);
 
@@ -302,9 +380,19 @@ function createTrackCard(track, { saveButton = false, openLyricsButton = false }
   const download = document.createElement("button");
   download.type = "button";
   download.className = "ghost-button";
-  download.textContent = "Скачать";
-  download.addEventListener("click", () => {
-    triggerTrackDownload(track).catch((error) => setStatusText(error.message));
+  download.textContent = isTrackDownloaded(track) ? "Скачать заново" : "Скачать";
+  download.addEventListener("click", async () => {
+    try {
+      await triggerTrackDownload(track, track.bucket || "library");
+      download.textContent = "Скачать заново";
+      node.querySelector(".track-card__meta").textContent = [
+        track.album || null,
+        track.duration_seconds ? formatDuration(track.duration_seconds) : null,
+        downloadedLabel(track),
+      ].filter(Boolean).join(" • ");
+    } catch (error) {
+      setStatusText(error.message);
+    }
   });
   actions.appendChild(download);
 
@@ -322,7 +410,8 @@ function createTrackCard(track, { saveButton = false, openLyricsButton = false }
     const save = document.createElement("button");
     save.type = "button";
     save.className = "ghost-button";
-    save.textContent = "В библиотеку";
+    save.textContent = getLibraryMirror(track) ? "Уже в библиотеке" : "В библиотеку";
+    save.disabled = Boolean(getLibraryMirror(track));
     save.addEventListener("click", async () => {
       await request("/api/library/tracks", {
         method: "POST",
@@ -330,12 +419,17 @@ function createTrackCard(track, { saveButton = false, openLyricsButton = false }
       });
       await loadLibrary($("#library-query")?.value?.trim() || "");
       try {
-        await triggerTrackDownload(track);
+        await triggerTrackDownload(track, "library");
       } catch (error) {
         console.warn(error);
       }
-      save.textContent = "Сохранено";
+      save.textContent = "Уже в библиотеке";
       save.disabled = true;
+      node.querySelector(".track-card__meta").textContent = [
+        track.album || null,
+        track.duration_seconds ? formatDuration(track.duration_seconds) : null,
+        downloadedLabel(track),
+      ].filter(Boolean).join(" • ");
     });
     actions.appendChild(save);
   }
@@ -378,6 +472,7 @@ async function bootstrap() {
   }
   restorePlayerState();
   await loadHealth();
+  await loadLibrary("");
   renderQueue();
   updatePlayerUi();
 }
@@ -407,8 +502,9 @@ async function performSearch(event) {
   setStatusText(`Найдено: ${payload.total}`);
   const container = $("#search-results");
   container.innerHTML = "";
+  prefetchPlaybackUrls(payload.results);
   payload.results.forEach((track) => {
-    container.appendChild(createTrackCard(track, { saveButton: true, openLyricsButton: true }));
+    container.appendChild(createTrackCard(track, { saveButton: true, openLyricsButton: true, collectionTracks: payload.results }));
   });
 }
 
@@ -430,7 +526,7 @@ async function performLyricsSearch(event) {
 
 async function loadLibrary(query = "") {
   const normalizedQuery = (query || "").trim();
-  const payload = await request(`/api/library?bucket=library&limit=300&query=${encodeURIComponent(normalizedQuery)}`);
+  const payload = await request(`/api/library?bucket=library&limit=2000&query=${encodeURIComponent(normalizedQuery)}`);
   state.libraryTracks = payload.tracks;
   const container = $("#library-results");
   $("#library-summary").textContent = normalizedQuery ? `Найдено в библиотеке: ${payload.tracks.length}` : `Всего в библиотеке: ${payload.tracks.length}`;
@@ -439,11 +535,12 @@ async function loadLibrary(query = "") {
     container.innerHTML = '<div class="lyrics-card empty-state">В библиотеке пока ничего не найдено.</div>';
     return;
   }
-  payload.tracks.forEach((track) => container.appendChild(createTrackCard(track, { openLyricsButton: true })));
+  prefetchPlaybackUrls(payload.tracks);
+  payload.tracks.forEach((track) => container.appendChild(createTrackCard(track, { openLyricsButton: true, collectionTracks: payload.tracks })));
 }
 
 async function loadLiked() {
-  const payload = await request("/api/library?bucket=liked&limit=300");
+  const payload = await request("/api/library?bucket=liked&limit=2000");
   state.likedTracks = payload.tracks;
   renderLikedTracks(payload.tracks);
 }
@@ -455,7 +552,8 @@ function renderLikedTracks(tracks) {
     container.innerHTML = '<div class="lyrics-card empty-state">Лайки еще не синхронизированы.</div>';
     return;
   }
-  tracks.forEach((track) => container.appendChild(createTrackCard(track, { openLyricsButton: true })));
+  prefetchPlaybackUrls(tracks);
+  tracks.forEach((track) => container.appendChild(createTrackCard(track, { openLyricsButton: true, collectionTracks: tracks })));
 }
 
 function renderLikedStats(result) {
@@ -483,8 +581,8 @@ async function syncLiked() {
     renderLikedStats(payload.result);
   }
   state.likedTracks = payload.tracks || [];
-  renderLikedTracks(state.likedTracks);
   await loadLibrary($("#library-query")?.value?.trim() || "");
+  renderLikedTracks(state.likedTracks);
   if (payload.library_new_tracks?.length) {
     setStatusText(`${payload.message} Новых треков в библиотеке: ${payload.library_new_tracks.length}.`, "liked");
     autoDownloadTracks(payload.library_new_tracks).catch((error) => console.warn(error));
