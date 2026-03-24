@@ -65,6 +65,15 @@ def ensure_database() -> None:
     db.init()
 
 
+@app.after_request
+def disable_cache(response):
+    if request.path == "/" or request.path.startswith("/static/") or request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 @app.get("/")
 def index():
     return send_from_directory(STATIC_DIR, "index.html")
@@ -176,7 +185,12 @@ def api_save_track():
         return jsonify({"detail": "Недостаточно данных для сохранения трека."}), 400
 
     db.save_track(payload, bucket=bucket, telegram_user_id=telegram_user_id)
-    return jsonify({"ok": True})
+    saved_track = db.list_tracks(
+        bucket=bucket,
+        limit=1,
+        telegram_user_id=telegram_user_id,
+    )
+    return jsonify({"ok": True, "track": saved_track[0] if saved_track else payload})
 
 
 @app.post("/api/library/mark-downloaded")

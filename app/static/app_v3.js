@@ -33,6 +33,14 @@ function currentUserId() {
   return Number.isFinite(value) ? value : 0;
 }
 
+function ensureUserId() {
+  const userId = currentUserId();
+  if (!userId) {
+    throw new Error("Mini App не получил Telegram user id. Закройте и заново откройте приложение из бота.");
+  }
+  return userId;
+}
+
 function formatDuration(seconds) {
   const value = Number(seconds || 0);
   const minutes = Math.floor(value / 60);
@@ -480,8 +488,15 @@ function createTrackCard(track, { saveButton = false, openLyricsButton = false, 
       try {
         await request("/api/library/tracks", {
           method: "POST",
-          body: JSON.stringify({ ...track, bucket: "library", telegram_user_id: currentUserId() }),
+          body: JSON.stringify({ ...track, bucket: "library", telegram_user_id: ensureUserId() }),
         });
+        if (!getLibraryMirror(track)) {
+          state.libraryTracks.unshift({
+            ...track,
+            bucket: "library",
+            download_requested_at: track.download_requested_at || null,
+          });
+        }
         const queryNode = $("#library-query");
         if (queryNode) queryNode.value = "";
         await loadLibrary("");
@@ -618,7 +633,7 @@ async function syncLibraryFromLiked() {
   setStatusText("Синхронизация библиотеки запущена...", "library-sync");
   const payload = await request("/api/liked/sync", {
     method: "POST",
-    body: JSON.stringify({ telegram_user_id: currentUserId() }),
+    body: JSON.stringify({ telegram_user_id: ensureUserId() }),
   });
   setStatusText(payload.message, "library-sync");
   if (payload.result) renderLibrarySyncStats(payload.result);
@@ -655,7 +670,7 @@ async function importPlaylistByUrl(event) {
   setStatusText("Добавляю плейлист в библиотеку...", "library-sync");
   const payload = await request("/api/yandex/playlist/import", {
     method: "POST",
-    body: JSON.stringify({ telegram_user_id: currentUserId(), url }),
+    body: JSON.stringify({ telegram_user_id: ensureUserId(), url }),
   });
   $("#playlist-url").value = "";
   setStatusText(`${payload.message} Импортировано новых: ${payload.imported}, уже было: ${payload.existing}.`, "library-sync");
