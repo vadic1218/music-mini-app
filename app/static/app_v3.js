@@ -637,6 +637,8 @@ async function syncLibraryFromLiked() {
   });
   setStatusText(payload.message, "library-sync");
   if (payload.result) renderLibrarySyncStats(payload.result);
+  const queryNode = $("#library-query");
+  if (queryNode) queryNode.value = "";
   await loadLibrary($("#library-query")?.value?.trim() || "");
   await loadDownloads($("#downloads-query")?.value?.trim() || "");
   await loadHealth();
