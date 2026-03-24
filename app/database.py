@@ -353,41 +353,22 @@ class Database:
         telegram_user_id: int | str | None = None,
     ) -> list[dict]:
         normalized_user_id = self._normalize_user_id(telegram_user_id)
-        normalized_query = (query or "").strip().lower()
+        normalized_query = (query or "").strip().casefold()
         with self.connect() as conn:
             downloaded_clause = " AND download_requested_at IS NOT NULL" if downloaded_only else ""
-            if normalized_query:
-                like = f"%{normalized_query}%"
-                rows = conn.execute(
-                    f"""
-                    SELECT source, source_track_id, title, artists, album,
-                           duration_seconds, cover_url, external_url, source_meta, bucket, updated_at, download_requested_at
-                    FROM library_tracks
-                    WHERE telegram_user_id = ? AND bucket = ? AND is_active = 1
-                      {downloaded_clause}
-                      AND (
-                          lower(title) LIKE ?
-                          OR lower(artists) LIKE ?
-                          OR lower(COALESCE(album, '')) LIKE ?
-                      )
-                    ORDER BY updated_at DESC, title COLLATE NOCASE ASC
-                    LIMIT ?
-                    """,
-                    (normalized_user_id, bucket, like, like, like, limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    f"""
-                    SELECT source, source_track_id, title, artists, album,
-                           duration_seconds, cover_url, external_url, source_meta, bucket, updated_at, download_requested_at
-                    FROM library_tracks
-                    WHERE telegram_user_id = ? AND bucket = ? AND is_active = 1
-                    {downloaded_clause}
-                    ORDER BY updated_at DESC, title COLLATE NOCASE ASC
-                    LIMIT ?
-                    """,
-                    (normalized_user_id, bucket, limit),
-                ).fetchall()
+            base_limit = max(limit * 5, 2000) if normalized_query else limit
+            rows = conn.execute(
+                f"""
+                SELECT source, source_track_id, title, artists, album,
+                       duration_seconds, cover_url, external_url, source_meta, bucket, updated_at, download_requested_at
+                FROM library_tracks
+                WHERE telegram_user_id = ? AND bucket = ? AND is_active = 1
+                {downloaded_clause}
+                ORDER BY updated_at DESC, title COLLATE NOCASE ASC
+                LIMIT ?
+                """,
+                (normalized_user_id, bucket, base_limit),
+            ).fetchall()
         tracks = []
         for row in rows:
             item = dict(row)
@@ -396,7 +377,19 @@ class Database:
                 item["source_meta"] = json.loads(raw_meta) if raw_meta else {}
             except json.JSONDecodeError:
                 item["source_meta"] = {}
+            if normalized_query:
+                haystack = " ".join(
+                    [
+                        str(item.get("title") or ""),
+                        str(item.get("artists") or ""),
+                        str(item.get("album") or ""),
+                    ]
+                ).casefold()
+                if normalized_query not in haystack:
+                    continue
             tracks.append(item)
+            if len(tracks) >= limit:
+                break
         return tracks
 
     def mark_download_requested(

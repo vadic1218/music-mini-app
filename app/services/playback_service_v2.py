@@ -68,10 +68,27 @@ def get_youtube_stream_url(video_id: str | None = None, external_url: str | None
 
     options = {
         "quiet": True,
+        "no_warnings": True,
+        "ignoreerrors": True,
         "skip_download": True,
         "noplaylist": True,
         "nocheckcertificate": True,
+        "geo_bypass": True,
         "extract_flat": False,
+        "format": "bestaudio[ext=m4a]/bestaudio/best",
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "ios", "web"],
+                "player_skip": ["configs", "webpage"],
+            }
+        },
+        "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
     }
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
