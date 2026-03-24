@@ -85,11 +85,18 @@
         <div class="card action-card">
           <div>
             <strong>Синхронизация лайков Яндекс.Музыки</strong>
-            <p id="library-sync-status">Нажмите кнопку, чтобы добавить лайки прямо в библиотеку.</p>
+            <p id="library-sync-status">Нажмите кнопку, чтобы обновить библиотеку из ваших лайков Яндекс.Музыки без автоскачивания.</p>
           </div>
-          <button id="library-sync-button" class="primary-button" type="button">Синхронизировать библиотеку</button>
+          <div class="card__actions">
+            <button id="library-sync-button" class="primary-button" type="button">Синхронизировать библиотеку</button>
+            <button id="library-download-all-button" class="ghost-button" type="button">Скачать всё</button>
+          </div>
         </div>
         <div id="library-sync-stats" class="stats-grid"></div>
+        <form id="playlist-import-form" class="card">
+          <input id="playlist-url" class="input" placeholder="Ссылка на плейлист Яндекс.Музыки">
+          <button id="playlist-import-button" class="primary-button" type="submit">Добавить плейлист в библиотеку</button>
+        </form>
         <form id="library-search-form" class="card">
           <input id="library-query" class="input" placeholder="Поиск по библиотеке: название, артист или альбом">
           <button class="primary-button" type="submit">Найти в библиотеке</button>
@@ -178,6 +185,6 @@
     </article>
   </template>
 
-  <script src="/static/app.js?v=20260324c"></script>
+  <script src="/static/app_v2.js?v=20260324d"></script>
 </body>
 </html>

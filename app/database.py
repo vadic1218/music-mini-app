@@ -44,26 +44,9 @@ class Database:
                     updated_at TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS library_tracks (
-                    source TEXT NOT NULL,
-                    source_track_id TEXT NOT NULL,
-                    title TEXT NOT NULL,
-                    artists TEXT NOT NULL,
-                    album TEXT,
-                    duration_seconds INTEGER DEFAULT 0,
-                    cover_url TEXT,
-                    external_url TEXT,
-                    source_meta TEXT,
-                    bucket TEXT NOT NULL DEFAULT 'library',
-                    is_active INTEGER NOT NULL DEFAULT 1,
-                    download_requested_at TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (source, source_track_id, bucket)
-                );
-
                 CREATE TABLE IF NOT EXISTS sync_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    telegram_user_id INTEGER NOT NULL DEFAULT 0,
                     sync_type TEXT NOT NULL,
                     total_count INTEGER NOT NULL DEFAULT 0,
                     new_count INTEGER NOT NULL DEFAULT 0,
@@ -71,21 +54,84 @@ class Database:
                     removed_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL
                 );
-
-                CREATE INDEX IF NOT EXISTS idx_library_tracks_bucket_active_updated
-                ON library_tracks(bucket, is_active, updated_at DESC);
-
-                CREATE INDEX IF NOT EXISTS idx_library_tracks_bucket_title
-                ON library_tracks(bucket, title COLLATE NOCASE);
                 """
             )
+
+            table_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'library_tracks'"
+            ).fetchone()
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(library_tracks)").fetchall()} if table_exists else set()
+
+            if not table_exists or "telegram_user_id" not in columns:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS library_tracks_v2 (
+                        telegram_user_id INTEGER NOT NULL DEFAULT 0,
+                        source TEXT NOT NULL,
+                        source_track_id TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        artists TEXT NOT NULL,
+                        album TEXT,
+                        duration_seconds INTEGER DEFAULT 0,
+                        cover_url TEXT,
+                        external_url TEXT,
+                        source_meta TEXT,
+                        bucket TEXT NOT NULL DEFAULT 'library',
+                        is_active INTEGER NOT NULL DEFAULT 1,
+                        download_requested_at TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        PRIMARY KEY (telegram_user_id, source, source_track_id, bucket)
+                    );
+                    """
+                )
+                if table_exists:
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO library_tracks_v2 (
+                            telegram_user_id, source, source_track_id, title, artists, album,
+                            duration_seconds, cover_url, external_url, source_meta, bucket,
+                            is_active, download_requested_at, created_at, updated_at
+                        )
+                        SELECT
+                            0, source, source_track_id, title, artists, album,
+                            duration_seconds, cover_url, external_url, source_meta, bucket,
+                            is_active, download_requested_at, created_at, updated_at
+                        FROM library_tracks
+                        """
+                    )
+                    conn.execute("DROP TABLE library_tracks")
+                conn.execute("ALTER TABLE library_tracks_v2 RENAME TO library_tracks")
 
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(library_tracks)").fetchall()}
             if "source_meta" not in columns:
                 conn.execute("ALTER TABLE library_tracks ADD COLUMN source_meta TEXT")
             if "download_requested_at" not in columns:
                 conn.execute("ALTER TABLE library_tracks ADD COLUMN download_requested_at TEXT")
+            if "telegram_user_id" not in columns:
+                conn.execute("ALTER TABLE library_tracks ADD COLUMN telegram_user_id INTEGER NOT NULL DEFAULT 0")
+
+            sync_columns = {row["name"] for row in conn.execute("PRAGMA table_info(sync_runs)").fetchall()}
+            if "telegram_user_id" not in sync_columns:
+                conn.execute("ALTER TABLE sync_runs ADD COLUMN telegram_user_id INTEGER NOT NULL DEFAULT 0")
+
+            conn.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_library_tracks_user_bucket_active_updated
+                ON library_tracks(telegram_user_id, bucket, is_active, updated_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_library_tracks_user_bucket_title
+                ON library_tracks(telegram_user_id, bucket, title COLLATE NOCASE);
+                """
+            )
         self._initialized = True
+
+    @staticmethod
+    def _normalize_user_id(telegram_user_id: int | str | None) -> int:
+        try:
+            return int(telegram_user_id or 0)
+        except (TypeError, ValueError):
+            return 0
 
     def upsert_user(self, user_payload: dict) -> None:
         if not user_payload or "id" not in user_payload:
@@ -114,18 +160,50 @@ class Database:
                 ),
             )
 
-    def save_track(self, track: dict, bucket: str = "library") -> None:
+    def claim_legacy_library(self, telegram_user_id: int | str | None) -> int:
+        normalized_user_id = self._normalize_user_id(telegram_user_id)
+        if normalized_user_id <= 0:
+            return 0
+        with self.connect() as conn:
+            user_count = conn.execute(
+                "SELECT COUNT(*) FROM library_tracks WHERE telegram_user_id = ?",
+                (normalized_user_id,),
+            ).fetchone()[0]
+            if user_count:
+                return 0
+
+            legacy_count = conn.execute(
+                "SELECT COUNT(*) FROM library_tracks WHERE telegram_user_id = 0"
+            ).fetchone()[0]
+            claimed_count = conn.execute(
+                "SELECT COUNT(DISTINCT telegram_user_id) FROM library_tracks WHERE telegram_user_id != 0"
+            ).fetchone()[0]
+            if not legacy_count or claimed_count:
+                return 0
+
+            conn.execute(
+                "UPDATE library_tracks SET telegram_user_id = ? WHERE telegram_user_id = 0",
+                (normalized_user_id,),
+            )
+            conn.execute(
+                "UPDATE sync_runs SET telegram_user_id = ? WHERE telegram_user_id = 0",
+                (normalized_user_id,),
+            )
+        return int(legacy_count)
+
+    def save_track(self, track: dict, bucket: str = "library", telegram_user_id: int | str | None = None) -> None:
+        normalized_user_id = self._normalize_user_id(telegram_user_id)
         now = utcnow()
         with self.connect() as conn:
             conn.execute(
                 """
                 INSERT INTO library_tracks (
-                    source, source_track_id, title, artists, album,
+                    telegram_user_id, source, source_track_id, title, artists, album,
                     duration_seconds, cover_url, external_url, source_meta, bucket,
                     is_active, download_requested_at, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-                ON CONFLICT(source, source_track_id, bucket) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                ON CONFLICT(telegram_user_id, source, source_track_id, bucket) DO UPDATE SET
                     title = excluded.title,
                     artists = excluded.artists,
                     album = excluded.album,
@@ -138,6 +216,7 @@ class Database:
                     updated_at = excluded.updated_at
                 """,
                 (
+                    normalized_user_id,
                     track["source"],
                     str(track["source_track_id"]),
                     track["title"],
@@ -154,20 +233,28 @@ class Database:
                 ),
             )
 
-    def has_track(self, source: str, source_track_id: str | int, bucket: str = "library") -> bool:
+    def has_track(
+        self,
+        source: str,
+        source_track_id: str | int,
+        bucket: str = "library",
+        telegram_user_id: int | str | None = None,
+    ) -> bool:
+        normalized_user_id = self._normalize_user_id(telegram_user_id)
         with self.connect() as conn:
             row = conn.execute(
                 """
                 SELECT 1
                 FROM library_tracks
-                WHERE source = ? AND source_track_id = ? AND bucket = ? AND is_active = 1
+                WHERE telegram_user_id = ? AND source = ? AND source_track_id = ? AND bucket = ? AND is_active = 1
                 LIMIT 1
                 """,
-                (source, str(source_track_id), bucket),
+                (normalized_user_id, source, str(source_track_id), bucket),
             ).fetchone()
         return bool(row)
 
-    def sync_bucket(self, tracks: Iterable[dict], bucket: str) -> dict:
+    def sync_bucket(self, tracks: Iterable[dict], bucket: str, telegram_user_id: int | str | None = None) -> dict:
+        normalized_user_id = self._normalize_user_id(telegram_user_id)
         tracks = list(tracks)
         now = utcnow()
         incoming_keys = {(track["source"], str(track["source_track_id"])) for track in tracks}
@@ -180,17 +267,17 @@ class Database:
                 """
                 SELECT source, source_track_id
                 FROM library_tracks
-                WHERE bucket = ?
+                WHERE telegram_user_id = ? AND bucket = ?
                 """,
-                (bucket,),
+                (normalized_user_id, bucket),
             ).fetchall()
 
             existing_keys = {(row["source"], row["source_track_id"]) for row in existing_rows}
             removed_keys = existing_keys - incoming_keys
 
             conn.execute(
-                "UPDATE library_tracks SET is_active = 0, updated_at = ? WHERE bucket = ?",
-                (now, bucket),
+                "UPDATE library_tracks SET is_active = 0, updated_at = ? WHERE telegram_user_id = ? AND bucket = ?",
+                (now, normalized_user_id, bucket),
             )
 
             for track in tracks:
@@ -204,12 +291,12 @@ class Database:
                 conn.execute(
                     """
                     INSERT INTO library_tracks (
-                        source, source_track_id, title, artists, album,
+                        telegram_user_id, source, source_track_id, title, artists, album,
                         duration_seconds, cover_url, external_url, source_meta, bucket,
                         is_active, download_requested_at, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-                    ON CONFLICT(source, source_track_id, bucket) DO UPDATE SET
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                    ON CONFLICT(telegram_user_id, source, source_track_id, bucket) DO UPDATE SET
                         title = excluded.title,
                         artists = excluded.artists,
                         album = excluded.album,
@@ -222,6 +309,7 @@ class Database:
                         updated_at = excluded.updated_at
                     """,
                     (
+                        normalized_user_id,
                         track["source"],
                         str(track["source_track_id"]),
                         track["title"],
@@ -241,11 +329,11 @@ class Database:
             conn.execute(
                 """
                 INSERT INTO sync_runs (
-                    sync_type, total_count, new_count, existing_count, removed_count, created_at
+                    telegram_user_id, sync_type, total_count, new_count, existing_count, removed_count, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (bucket, len(tracks), new_count, existing_count, len(removed_keys), now),
+                (normalized_user_id, bucket, len(tracks), new_count, existing_count, len(removed_keys), now),
             )
 
         return {
@@ -262,7 +350,9 @@ class Database:
         limit: int = 200,
         query: str | None = None,
         downloaded_only: bool = False,
+        telegram_user_id: int | str | None = None,
     ) -> list[dict]:
+        normalized_user_id = self._normalize_user_id(telegram_user_id)
         normalized_query = (query or "").strip().lower()
         with self.connect() as conn:
             downloaded_clause = " AND download_requested_at IS NOT NULL" if downloaded_only else ""
@@ -273,7 +363,7 @@ class Database:
                     SELECT source, source_track_id, title, artists, album,
                            duration_seconds, cover_url, external_url, source_meta, bucket, updated_at, download_requested_at
                     FROM library_tracks
-                    WHERE bucket = ? AND is_active = 1
+                    WHERE telegram_user_id = ? AND bucket = ? AND is_active = 1
                       {downloaded_clause}
                       AND (
                           lower(title) LIKE ?
@@ -283,7 +373,7 @@ class Database:
                     ORDER BY updated_at DESC, title COLLATE NOCASE ASC
                     LIMIT ?
                     """,
-                    (bucket, like, like, like, limit),
+                    (normalized_user_id, bucket, like, like, like, limit),
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -291,12 +381,12 @@ class Database:
                     SELECT source, source_track_id, title, artists, album,
                            duration_seconds, cover_url, external_url, source_meta, bucket, updated_at, download_requested_at
                     FROM library_tracks
-                    WHERE bucket = ? AND is_active = 1
+                    WHERE telegram_user_id = ? AND bucket = ? AND is_active = 1
                     {downloaded_clause}
                     ORDER BY updated_at DESC, title COLLATE NOCASE ASC
                     LIMIT ?
                     """,
-                    (bucket, limit),
+                    (normalized_user_id, bucket, limit),
                 ).fetchall()
         tracks = []
         for row in rows:
@@ -309,15 +399,22 @@ class Database:
             tracks.append(item)
         return tracks
 
-    def mark_download_requested(self, source: str, source_track_id: str | int, bucket: str = "library") -> None:
+    def mark_download_requested(
+        self,
+        source: str,
+        source_track_id: str | int,
+        bucket: str = "library",
+        telegram_user_id: int | str | None = None,
+    ) -> None:
+        normalized_user_id = self._normalize_user_id(telegram_user_id)
         with self.connect() as conn:
             conn.execute(
                 """
                 UPDATE library_tracks
                 SET download_requested_at = ?, updated_at = ?
-                WHERE source = ? AND source_track_id = ? AND bucket = ? AND is_active = 1
+                WHERE telegram_user_id = ? AND source = ? AND source_track_id = ? AND bucket = ? AND is_active = 1
                 """,
-                (utcnow(), utcnow(), source, str(source_track_id), bucket),
+                (utcnow(), utcnow(), normalized_user_id, source, str(source_track_id), bucket),
             )
 
     def stats(self) -> dict:

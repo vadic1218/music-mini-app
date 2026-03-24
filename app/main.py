@@ -15,8 +15,8 @@ from app.config import (
 )
 from app.database import db
 from app.services.lyrics_service import get_lyrics
-from app.services.playback_service import resolve_stream_url
-from app.services.search_service import get_yandex_liked_tracks, search_tracks
+from app.services.playback_service_v2 import resolve_stream_url
+from app.services.search_service_v2 import get_yandex_liked_tracks, get_yandex_playlist_tracks, search_tracks
 from app.services.telegram_auth import validate_init_data
 
 
@@ -28,6 +28,22 @@ app = Flask(
 app.json.ensure_ascii = False
 
 db.init()
+
+
+def _extract_telegram_user_id(payload: dict | None = None) -> int:
+    payload = payload or {}
+    candidates = [
+        payload.get("telegram_user_id"),
+        payload.get("user_id"),
+        request.args.get("telegram_user_id"),
+        request.args.get("user_id"),
+    ]
+    for candidate in candidates:
+        try:
+            return int(candidate or 0)
+        except (TypeError, ValueError):
+            continue
+    return 0
 
 
 @app.before_request
@@ -71,6 +87,7 @@ def upsert_session():
 
     if user:
         db.upsert_user(user)
+        db.claim_legacy_library(user.get("id"))
 
     return jsonify({"ok": True})
 
@@ -103,6 +120,7 @@ def api_lyrics():
 
 @app.get("/api/library")
 def api_library():
+    telegram_user_id = _extract_telegram_user_id()
     bucket = (request.args.get("bucket") or "library").strip()
     query = (request.args.get("query") or "").strip()
     limit = int(request.args.get("limit") or 2000)
@@ -112,7 +130,13 @@ def api_library():
             "bucket": bucket,
             "query": query,
             "downloaded_only": downloaded_only,
-            "tracks": db.list_tracks(bucket=bucket, limit=limit, query=query, downloaded_only=downloaded_only),
+            "tracks": db.list_tracks(
+                bucket=bucket,
+                limit=limit,
+                query=query,
+                downloaded_only=downloaded_only,
+                telegram_user_id=telegram_user_id,
+            ),
         }
     )
 
@@ -120,25 +144,27 @@ def api_library():
 @app.post("/api/library/tracks")
 def api_save_track():
     payload = request.get_json(silent=True) or {}
+    telegram_user_id = _extract_telegram_user_id(payload)
     bucket = payload.get("bucket", "library")
     required_fields = ["source", "source_track_id", "title", "artists"]
     if any(not payload.get(field) for field in required_fields):
         return jsonify({"detail": "Недостаточно данных для сохранения трека."}), 400
 
-    db.save_track(payload, bucket=bucket)
+    db.save_track(payload, bucket=bucket, telegram_user_id=telegram_user_id)
     return jsonify({"ok": True})
 
 
 @app.post("/api/library/mark-downloaded")
 def api_mark_downloaded():
     payload = request.get_json(silent=True) or {}
+    telegram_user_id = _extract_telegram_user_id(payload)
     source = payload.get("source")
     source_track_id = payload.get("source_track_id")
     bucket = payload.get("bucket", "library")
     if not source or not source_track_id:
         return jsonify({"detail": "Недостаточно данных для отметки скачивания."}), 400
 
-    db.mark_download_requested(source, source_track_id, bucket=bucket)
+    db.mark_download_requested(source, source_track_id, bucket=bucket, telegram_user_id=telegram_user_id)
     return jsonify({"ok": True})
 
 
@@ -175,6 +201,8 @@ def api_download_url():
 
 @app.post("/api/liked/sync")
 def api_sync_liked():
+    payload = request.get_json(silent=True) or {}
+    telegram_user_id = _extract_telegram_user_id(payload)
     tracks = get_yandex_liked_tracks()
     if not tracks:
         return jsonify(
@@ -185,11 +213,16 @@ def api_sync_liked():
             }
         )
 
-    result = db.sync_bucket(tracks, bucket="liked")
+    result = db.sync_bucket(tracks, bucket="liked", telegram_user_id=telegram_user_id)
     library_new_tracks: list[dict] = []
     for track in tracks:
-        existed = db.has_track(track.get("source"), track.get("source_track_id"), bucket="library")
-        db.save_track(track, bucket="library")
+        existed = db.has_track(
+            track.get("source"),
+            track.get("source_track_id"),
+            bucket="library",
+            telegram_user_id=telegram_user_id,
+        )
+        db.save_track(track, bucket="library", telegram_user_id=telegram_user_id)
         if not existed:
             library_new_tracks.append(track)
 
@@ -198,8 +231,48 @@ def api_sync_liked():
             "ok": True,
             "message": "Синхронизация лайков завершена.",
             "result": result,
-            "tracks": db.list_tracks(bucket="liked", limit=2000),
+            "tracks": db.list_tracks(bucket="liked", limit=2000, telegram_user_id=telegram_user_id),
             "library_new_tracks": library_new_tracks,
+        }
+    )
+
+
+@app.post("/api/yandex/playlist/import")
+def api_import_yandex_playlist():
+    payload = request.get_json(silent=True) or {}
+    telegram_user_id = _extract_telegram_user_id(payload)
+    playlist_url = (payload.get("url") or "").strip()
+    if not playlist_url:
+        return jsonify({"detail": "Нужна ссылка на плейлист Яндекс.Музыки."}), 400
+
+    result = get_yandex_playlist_tracks(playlist_url)
+    if not result.get("ok"):
+        return jsonify(result), 400
+
+    imported = 0
+    existing = 0
+    for track in result.get("tracks") or []:
+        already_exists = db.has_track(
+            track.get("source"),
+            track.get("source_track_id"),
+            bucket="library",
+            telegram_user_id=telegram_user_id,
+        )
+        db.save_track(track, bucket="library", telegram_user_id=telegram_user_id)
+        if already_exists:
+            existing += 1
+        else:
+            imported += 1
+
+    return jsonify(
+        {
+            "ok": True,
+            "message": "Плейлист добавлен в библиотеку.",
+            "playlist_title": result.get("playlist_title"),
+            "total": len(result.get("tracks") or []),
+            "imported": imported,
+            "existing": existing,
+            "tracks": db.list_tracks(bucket="library", limit=2000, telegram_user_id=telegram_user_id),
         }
     )
 
