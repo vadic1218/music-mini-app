@@ -17,6 +17,7 @@ def utcnow() -> str:
 class Database:
     def __init__(self, path: Path):
         self.path = path
+        self._initialized = False
 
     @contextmanager
     def connect(self):
@@ -29,6 +30,8 @@ class Database:
             connection.close()
 
     def init(self) -> None:
+        if self._initialized:
+            return
         with self.connect() as conn:
             conn.executescript(
                 """
@@ -67,12 +70,19 @@ class Database:
                     removed_count INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE INDEX IF NOT EXISTS idx_library_tracks_bucket_active_updated
+                ON library_tracks(bucket, is_active, updated_at DESC);
+
+                CREATE INDEX IF NOT EXISTS idx_library_tracks_bucket_title
+                ON library_tracks(bucket, title COLLATE NOCASE);
                 """
             )
 
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(library_tracks)").fetchall()}
             if "source_meta" not in columns:
                 conn.execute("ALTER TABLE library_tracks ADD COLUMN source_meta TEXT")
+        self._initialized = True
 
     def upsert_user(self, user_payload: dict) -> None:
         if not user_payload or "id" not in user_payload:
@@ -139,12 +149,26 @@ class Database:
                 ),
             )
 
+    def has_track(self, source: str, source_track_id: str | int, bucket: str = "library") -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT 1
+                FROM library_tracks
+                WHERE source = ? AND source_track_id = ? AND bucket = ? AND is_active = 1
+                LIMIT 1
+                """,
+                (source, str(source_track_id), bucket),
+            ).fetchone()
+        return bool(row)
+
     def sync_bucket(self, tracks: Iterable[dict], bucket: str) -> dict:
         tracks = list(tracks)
         now = utcnow()
         incoming_keys = {(track["source"], str(track["source_track_id"])) for track in tracks}
         new_count = 0
         existing_count = 0
+        new_tracks: list[dict] = []
 
         with self.connect() as conn:
             existing_rows = conn.execute(
@@ -170,6 +194,7 @@ class Database:
                     existing_count += 1
                 else:
                     new_count += 1
+                    new_tracks.append(track)
 
                 conn.execute(
                     """
@@ -221,21 +246,42 @@ class Database:
             "new_count": new_count,
             "existing_count": existing_count,
             "removed_count": len(removed_keys),
+            "new_tracks": new_tracks,
         }
 
-    def list_tracks(self, bucket: str = "library", limit: int = 200) -> list[dict]:
+    def list_tracks(self, bucket: str = "library", limit: int = 200, query: str | None = None) -> list[dict]:
+        normalized_query = (query or "").strip().lower()
         with self.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT source, source_track_id, title, artists, album,
-                       duration_seconds, cover_url, external_url, source_meta, bucket, updated_at
-                FROM library_tracks
-                WHERE bucket = ? AND is_active = 1
-                ORDER BY updated_at DESC, title COLLATE NOCASE ASC
-                LIMIT ?
-                """,
-                (bucket, limit),
-            ).fetchall()
+            if normalized_query:
+                like = f"%{normalized_query}%"
+                rows = conn.execute(
+                    """
+                    SELECT source, source_track_id, title, artists, album,
+                           duration_seconds, cover_url, external_url, source_meta, bucket, updated_at
+                    FROM library_tracks
+                    WHERE bucket = ? AND is_active = 1
+                      AND (
+                          lower(title) LIKE ?
+                          OR lower(artists) LIKE ?
+                          OR lower(COALESCE(album, '')) LIKE ?
+                      )
+                    ORDER BY updated_at DESC, title COLLATE NOCASE ASC
+                    LIMIT ?
+                    """,
+                    (bucket, like, like, like, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT source, source_track_id, title, artists, album,
+                           duration_seconds, cover_url, external_url, source_meta, bucket, updated_at
+                    FROM library_tracks
+                    WHERE bucket = ? AND is_active = 1
+                    ORDER BY updated_at DESC, title COLLATE NOCASE ASC
+                    LIMIT ?
+                    """,
+                    (bucket, limit),
+                ).fetchall()
         tracks = []
         for row in rows:
             item = dict(row)

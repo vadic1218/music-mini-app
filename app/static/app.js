@@ -5,6 +5,14 @@
   health: null,
   currentTrack: null,
   queue: [],
+  likedTracks: [],
+  libraryTracks: [],
+  activeTab: "search",
+};
+
+const STORAGE_KEYS = {
+  queue: "ksb-mini-app-queue",
+  currentTrack: "ksb-mini-app-current-track",
 };
 
 function $(selector) {
@@ -18,6 +26,20 @@ function formatDuration(seconds) {
   return `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
 
+function setStatusText(message, target = "search") {
+  if (target === "library" && $("#library-summary")) {
+    $("#library-summary").textContent = message;
+    return;
+  }
+  if (target === "liked" && $("#liked-status-text")) {
+    $("#liked-status-text").textContent = message;
+    return;
+  }
+  if ($("#search-summary")) {
+    $("#search-summary").textContent = message;
+  }
+}
+
 function setActiveSegment(containerId, value, stateKey) {
   const container = document.getElementById(containerId);
   container.querySelectorAll(".segmented__item").forEach((button) => {
@@ -26,13 +48,29 @@ function setActiveSegment(containerId, value, stateKey) {
   state[stateKey] = value;
 }
 
-function switchTab(tabName) {
-  document.querySelectorAll(".tab").forEach((tab) => {
-    tab.classList.toggle("is-active", tab.dataset.tab === tabName);
-  });
-  document.querySelectorAll(".panel").forEach((panel) => {
-    panel.classList.toggle("is-active", panel.id === `tab-${tabName}`);
-  });
+function persistPlayerState() {
+  try {
+    localStorage.setItem(STORAGE_KEYS.queue, JSON.stringify(state.queue));
+    if (state.currentTrack) {
+      localStorage.setItem(STORAGE_KEYS.currentTrack, JSON.stringify(state.currentTrack));
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.currentTrack);
+    }
+  } catch (error) {
+    console.warn(error);
+  }
+}
+
+function restorePlayerState() {
+  try {
+    const queueRaw = localStorage.getItem(STORAGE_KEYS.queue);
+    state.queue = queueRaw ? JSON.parse(queueRaw) : [];
+    const currentRaw = localStorage.getItem(STORAGE_KEYS.currentTrack);
+    state.currentTrack = currentRaw ? JSON.parse(currentRaw) : null;
+  } catch (error) {
+    state.queue = [];
+    state.currentTrack = null;
+  }
 }
 
 async function request(url, options = {}) {
@@ -45,6 +83,27 @@ async function request(url, options = {}) {
     throw new Error(payload.detail || payload.message || "Запрос не выполнен.");
   }
   return payload;
+}
+
+function switchTab(tabName) {
+  state.activeTab = tabName;
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.tab === tabName);
+  });
+  document.querySelectorAll(".panel").forEach((panel) => {
+    panel.classList.toggle("is-active", panel.id === `tab-${tabName}`);
+  });
+
+  if (tabName === "library") {
+    loadLibrary($("#library-query")?.value?.trim() || "").catch((error) => {
+      setStatusText(error.message, "library");
+    });
+  }
+  if (tabName === "liked") {
+    loadLiked().catch((error) => {
+      setStatusText(error.message, "liked");
+    });
+  }
 }
 
 function trackKey(track) {
@@ -83,6 +142,7 @@ function updatePlayerUi() {
   $("#player-dock-title").textContent = hasTrack ? track.title : "Ничего не играет";
   $("#player-dock-subtitle").textContent = hasTrack ? (track.artists || "Неизвестный артист") : "Выберите трек";
   $("#player-dock-toggle").textContent = playing ? "⏸" : "▶";
+  persistPlayerState();
 }
 
 function renderQueue() {
@@ -90,6 +150,7 @@ function renderQueue() {
   container.innerHTML = "";
   if (!state.queue.length) {
     container.innerHTML = '<div class="lyrics-card empty-state">Очередь пуста. Добавьте треки кнопкой "Слушать следующим".</div>';
+    persistPlayerState();
     return;
   }
 
@@ -101,9 +162,7 @@ function renderQueue() {
     node.querySelector(".queue-item__body").addEventListener("click", () => {
       const [selected] = state.queue.splice(index, 1);
       renderQueue();
-      playTrack(selected).catch((error) => {
-        $("#search-summary").textContent = error.message;
-      });
+      playTrack(selected).catch((error) => setStatusText(error.message));
     });
     node.querySelector(".queue-item__remove").addEventListener("click", () => {
       state.queue.splice(index, 1);
@@ -112,6 +171,7 @@ function renderQueue() {
     });
     container.appendChild(node);
   });
+  persistPlayerState();
 }
 
 async function fetchPlaybackUrl(track) {
@@ -120,6 +180,36 @@ async function fetchPlaybackUrl(track) {
     body: JSON.stringify(track),
   });
   return payload.stream_url;
+}
+
+async function fetchDownloadPayload(track) {
+  return request("/api/download-url", {
+    method: "POST",
+    body: JSON.stringify(track),
+  });
+}
+
+async function triggerTrackDownload(track) {
+  const payload = await fetchDownloadPayload(track);
+  const anchor = document.createElement("a");
+  anchor.href = payload.download_url;
+  anchor.download = payload.filename || `${track.title || "track"}.mp3`;
+  anchor.target = "_blank";
+  anchor.rel = "noreferrer";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
+async function autoDownloadTracks(tracks) {
+  for (const track of tracks) {
+    try {
+      await triggerTrackDownload(track);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    } catch (error) {
+      console.warn(error);
+    }
+  }
 }
 
 async function playTrack(track) {
@@ -141,6 +231,7 @@ function enqueueTrack(track, { next = false } = {}) {
     updatePlayerUi();
     return;
   }
+
   if (next) {
     state.queue.unshift(track);
   } else {
@@ -148,6 +239,7 @@ function enqueueTrack(track, { next = false } = {}) {
   }
   renderQueue();
   updatePlayerUi();
+  setStatusText(next ? "Трек поставлен следующим." : "Трек добавлен в очередь.");
 }
 
 async function playNextTrack() {
@@ -196,9 +288,7 @@ function createTrackCard(track, { saveButton = false, openLyricsButton = false }
   play.className = "primary-button";
   play.textContent = "Слушать";
   play.addEventListener("click", () => {
-    playTrack(track).catch((error) => {
-      $("#search-summary").textContent = error.message;
-    });
+    playTrack(track).catch((error) => setStatusText(error.message));
   });
   actions.appendChild(play);
 
@@ -208,6 +298,15 @@ function createTrackCard(track, { saveButton = false, openLyricsButton = false }
   enqueue.textContent = "Слушать следующим";
   enqueue.addEventListener("click", () => enqueueTrack(track, { next: true }));
   actions.appendChild(enqueue);
+
+  const download = document.createElement("button");
+  download.type = "button";
+  download.className = "ghost-button";
+  download.textContent = "Скачать";
+  download.addEventListener("click", () => {
+    triggerTrackDownload(track).catch((error) => setStatusText(error.message));
+  });
+  actions.appendChild(download);
 
   if (track.external_url) {
     const link = document.createElement("a");
@@ -229,7 +328,12 @@ function createTrackCard(track, { saveButton = false, openLyricsButton = false }
         method: "POST",
         body: JSON.stringify({ ...track, bucket: "library" }),
       });
-      await loadLibrary();
+      await loadLibrary($("#library-query")?.value?.trim() || "");
+      try {
+        await triggerTrackDownload(track);
+      } catch (error) {
+        console.warn(error);
+      }
       save.textContent = "Сохранено";
       save.disabled = true;
     });
@@ -272,9 +376,8 @@ async function bootstrap() {
       }
     }
   }
+  restorePlayerState();
   await loadHealth();
-  await loadLibrary();
-  await loadLiked();
   renderQueue();
   updatePlayerUi();
 }
@@ -299,9 +402,9 @@ async function performSearch(event) {
   if (!query) {
     return;
   }
-  $("#search-summary").textContent = "Ищу треки...";
-  const payload = await request(`/api/search?q=${encodeURIComponent(query)}&source=${state.searchSource}&limit=20`);
-  $("#search-summary").textContent = `Найдено: ${payload.total}`;
+  setStatusText("Ищу треки...");
+  const payload = await request(`/api/search?q=${encodeURIComponent(query)}&source=${state.searchSource}&limit=30`);
+  setStatusText(`Найдено: ${payload.total}`);
   const container = $("#search-results");
   container.innerHTML = "";
   payload.results.forEach((track) => {
@@ -325,19 +428,23 @@ async function performLyricsSearch(event) {
   $("#lyrics-result").textContent = `${lyrics.title}\n${lyrics.artists}\nИсточник: ${lyrics.source}\n\n${lyrics.text}`;
 }
 
-async function loadLibrary() {
-  const payload = await request("/api/library?bucket=library&limit=100");
+async function loadLibrary(query = "") {
+  const normalizedQuery = (query || "").trim();
+  const payload = await request(`/api/library?bucket=library&limit=300&query=${encodeURIComponent(normalizedQuery)}`);
+  state.libraryTracks = payload.tracks;
   const container = $("#library-results");
+  $("#library-summary").textContent = normalizedQuery ? `Найдено в библиотеке: ${payload.tracks.length}` : `Всего в библиотеке: ${payload.tracks.length}`;
   container.innerHTML = "";
   if (!payload.tracks.length) {
-    container.innerHTML = '<div class="lyrics-card empty-state">Библиотека пока пустая. Сохраните трек из поиска.</div>';
+    container.innerHTML = '<div class="lyrics-card empty-state">В библиотеке пока ничего не найдено.</div>';
     return;
   }
   payload.tracks.forEach((track) => container.appendChild(createTrackCard(track, { openLyricsButton: true })));
 }
 
 async function loadLiked() {
-  const payload = await request("/api/library?bucket=liked&limit=100");
+  const payload = await request("/api/library?bucket=liked&limit=300");
+  state.likedTracks = payload.tracks;
   renderLikedTracks(payload.tracks);
 }
 
@@ -369,13 +476,19 @@ function renderLikedStats(result) {
 }
 
 async function syncLiked() {
-  $("#liked-status-text").textContent = "Синхронизация запущена...";
+  setStatusText("Синхронизация запущена...", "liked");
   const payload = await request("/api/liked/sync", { method: "POST" });
-  $("#liked-status-text").textContent = payload.message;
+  setStatusText(payload.message, "liked");
   if (payload.result) {
     renderLikedStats(payload.result);
   }
-  renderLikedTracks(payload.tracks || []);
+  state.likedTracks = payload.tracks || [];
+  renderLikedTracks(state.likedTracks);
+  await loadLibrary($("#library-query")?.value?.trim() || "");
+  if (payload.library_new_tracks?.length) {
+    setStatusText(`${payload.message} Новых треков в библиотеке: ${payload.library_new_tracks.length}.`, "liked");
+    autoDownloadTracks(payload.library_new_tracks).catch((error) => console.warn(error));
+  }
   await loadHealth();
 }
 
@@ -393,9 +506,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   $("#search-form").addEventListener("submit", (event) => {
-    performSearch(event).catch((error) => {
-      $("#search-summary").textContent = error.message;
-    });
+    performSearch(event).catch((error) => setStatusText(error.message));
   });
 
   $("#lyrics-form").addEventListener("submit", (event) => {
@@ -404,10 +515,13 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
+  $("#library-search-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    loadLibrary($("#library-query").value.trim()).catch((error) => setStatusText(error.message, "library"));
+  });
+
   $("#liked-sync-button").addEventListener("click", () => {
-    syncLiked().catch((error) => {
-      $("#liked-status-text").textContent = error.message;
-    });
+    syncLiked().catch((error) => setStatusText(error.message, "liked"));
   });
 
   $("#player-toggle").addEventListener("click", async () => {
@@ -433,9 +547,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   $("#player-next").addEventListener("click", () => {
-    playNextTrack().catch((error) => {
-      $("#search-summary").textContent = error.message;
-    });
+    playNextTrack().catch((error) => setStatusText(error.message));
   });
 
   $("#queue-clear").addEventListener("click", () => {
@@ -470,9 +582,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#audio-player").addEventListener("play", updatePlayerUi);
   $("#audio-player").addEventListener("pause", updatePlayerUi);
   $("#audio-player").addEventListener("ended", () => {
-    playNextTrack().catch((error) => {
-      $("#search-summary").textContent = error.message;
-    });
+    playNextTrack().catch((error) => setStatusText(error.message));
   });
 
   bootstrap().catch((error) => {

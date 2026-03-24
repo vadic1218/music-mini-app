@@ -50,7 +50,7 @@
       <section id="tab-liked" class="panel">
         <div class="panel__head">
           <h2>Мне понравилось</h2>
-          <p>Синхронизируйте свои лайки из Яндекс.Музыки и сразу слушайте их через встроенный плеер Mini App.</p>
+          <p>Синхронизируйте свои лайки из Яндекс.Музыки. Новые треки сразу добавляются в библиотеку и приложение попытается скачать их на устройство.</p>
         </div>
         <div class="card action-card">
           <div>
@@ -83,8 +83,13 @@
       <section id="tab-library" class="panel">
         <div class="panel__head">
           <h2>Библиотека</h2>
-          <p>Здесь хранятся треки, которые вы сохранили из поиска или из своей коллекции.</p>
+          <p>Здесь хранятся треки, которые вы сохранили из поиска или получили из синхронизации лайков.</p>
         </div>
+        <form id="library-search-form" class="card">
+          <input id="library-query" class="input" placeholder="Поиск по библиотеке: название, артист или альбом">
+          <button class="primary-button" type="submit">Найти в библиотеке</button>
+        </form>
+        <div id="library-summary" class="inline-note"></div>
         <div id="library-results" class="result-grid"></div>
       </section>
 

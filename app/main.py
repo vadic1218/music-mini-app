@@ -18,6 +18,8 @@ app = Flask(
     static_url_path="/static",
 )
 
+db.init()
+
 
 @app.before_request
 def ensure_database() -> None:
@@ -91,8 +93,9 @@ def api_lyrics():
 @app.get("/api/library")
 def api_library():
     bucket = (request.args.get("bucket") or "library").strip()
+    query = (request.args.get("query") or "").strip()
     limit = int(request.args.get("limit") or 200)
-    return jsonify({"bucket": bucket, "tracks": db.list_tracks(bucket=bucket, limit=limit)})
+    return jsonify({"bucket": bucket, "query": query, "tracks": db.list_tracks(bucket=bucket, limit=limit, query=query)})
 
 
 @app.post("/api/library/tracks")
@@ -121,6 +124,23 @@ def api_playback_url():
     return jsonify({"ok": True, "stream_url": stream_url})
 
 
+@app.post("/api/download-url")
+def api_download_url():
+    track = request.get_json(silent=True) or {}
+    required_fields = ["source", "source_track_id"]
+    if any(not track.get(field) for field in required_fields):
+        return jsonify({"detail": "Недостаточно данных для скачивания."}), 400
+
+    stream_url = resolve_stream_url(track)
+    if not stream_url:
+        return jsonify({"detail": "Не удалось получить ссылку на скачивание."}), 404
+
+    artists = (track.get("artists") or "Unknown Artist").strip()
+    title = (track.get("title") or "Track").strip()
+    safe_name = "".join(char if char.isalnum() or char in " _-()." else "_" for char in f"{artists} - {title}.mp3").strip()
+    return jsonify({"ok": True, "download_url": stream_url, "filename": safe_name or "track.mp3"})
+
+
 @app.post("/api/liked/sync")
 def api_sync_liked():
     tracks = get_yandex_liked_tracks()
@@ -134,12 +154,20 @@ def api_sync_liked():
         )
 
     result = db.sync_bucket(tracks, bucket="liked")
+    library_new_tracks: list[dict] = []
+    for track in tracks:
+        existed = db.has_track(track.get("source"), track.get("source_track_id"), bucket="library")
+        db.save_track(track, bucket="library")
+        if not existed:
+            library_new_tracks.append(track)
+
     return jsonify(
         {
             "ok": True,
             "message": "Синхронизация лайков завершена.",
             "result": result,
-            "tracks": db.list_tracks(bucket="liked", limit=50),
+            "tracks": db.list_tracks(bucket="liked", limit=200),
+            "library_new_tracks": library_new_tracks,
         }
     )
 

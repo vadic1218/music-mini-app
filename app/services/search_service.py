@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import yt_dlp
@@ -9,6 +10,25 @@ from app.config import SEARCH_RESULTS_PER_SOURCE, YANDEX_MUSIC_TOKEN
 
 
 _ym_client: Client | None = None
+_SEARCH_CACHE_TTL = 120
+_LIKED_CACHE_TTL = 90
+_search_cache: dict[tuple[str, str, int], tuple[float, list[dict[str, Any]]]] = {}
+_liked_cache: tuple[float, list[dict[str, Any]]] | None = None
+
+
+def _cache_get(cache: dict, key):
+    item = cache.get(key)
+    if not item:
+        return None
+    expires_at, payload = item
+    if expires_at < time.time():
+        cache.pop(key, None)
+        return None
+    return payload
+
+
+def _cache_set(cache: dict, key, payload, ttl: int):
+    cache[key] = (time.time() + ttl, payload)
 
 
 def get_ym_client() -> Client | None:
@@ -25,6 +45,12 @@ def get_ym_client() -> Client | None:
 
 
 def search_yandex_music(query: str, limit: int | None = None) -> list[dict[str, Any]]:
+    normalized_limit = limit or SEARCH_RESULTS_PER_SOURCE
+    cache_key = ("yandex", query.strip().lower(), normalized_limit)
+    cached = _cache_get(_search_cache, cache_key)
+    if cached is not None:
+        return cached
+
     client = get_ym_client()
     if not client:
         return []
@@ -36,7 +62,7 @@ def search_yandex_music(query: str, limit: int | None = None) -> list[dict[str, 
     except Exception:
         return []
 
-    tracks = response.tracks.results[: limit or SEARCH_RESULTS_PER_SOURCE]
+    tracks = response.tracks.results[:normalized_limit]
     results: list[dict[str, Any]] = []
     for track in tracks:
         if not track or not getattr(track, "id", None):
@@ -56,10 +82,15 @@ def search_yandex_music(query: str, limit: int | None = None) -> list[dict[str, 
                 "external_url": f"https://music.yandex.ru/album/{album.id}/track/{track.id}" if album else "",
             }
         )
+    _cache_set(_search_cache, cache_key, results, _SEARCH_CACHE_TTL)
     return results
 
 
 def get_yandex_liked_tracks() -> list[dict[str, Any]]:
+    global _liked_cache
+    if _liked_cache and _liked_cache[0] >= time.time():
+        return _liked_cache[1]
+
     client = get_ym_client()
     if not client:
         return []
@@ -88,11 +119,17 @@ def get_yandex_liked_tracks() -> list[dict[str, Any]]:
                 "external_url": f"https://music.yandex.ru/album/{album.id}/track/{track.id}" if album else "",
             }
         )
+    _liked_cache = (time.time() + _LIKED_CACHE_TTL, results)
     return results
 
 
 def search_youtube_music(query: str, limit: int | None = None) -> list[dict[str, Any]]:
     max_results = limit or SEARCH_RESULTS_PER_SOURCE
+    cache_key = ("youtube", query.strip().lower(), max_results)
+    cached = _cache_get(_search_cache, cache_key)
+    if cached is not None:
+        return cached
+
     options = {
         "quiet": True,
         "extract_flat": True,
@@ -131,6 +168,7 @@ def search_youtube_music(query: str, limit: int | None = None) -> list[dict[str,
                 "external_url": f"https://www.youtube.com/watch?v={video_id}",
             }
         )
+    _cache_set(_search_cache, cache_key, results, _SEARCH_CACHE_TTL)
     return results
 
 
