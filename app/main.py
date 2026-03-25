@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from pathlib import Path
@@ -138,6 +138,30 @@ def _extract_telegram_user_id(payload: dict | None = None) -> int:
         except (TypeError, ValueError):
             continue
     return 0
+
+
+def _extract_init_data_from_location(raw_location: str | None) -> str:
+    if not raw_location:
+        return ""
+    try:
+        parts = urlsplit(raw_location)
+    except Exception:
+        return ""
+
+    candidates = [parts.query, parts.fragment]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            parsed = parse_qs(candidate, keep_blank_values=True)
+        except Exception:
+            parsed = {}
+        value = (parsed.get("tgWebAppData") or parsed.get("init_data") or [None])[0]
+        if value:
+            return value
+        if "user=" in candidate and "hash=" in candidate:
+            return candidate
+    return ""
 
 
 def _liked_cache_path(telegram_user_id: int) -> Path:
@@ -408,6 +432,8 @@ def api_activate_promo():
 def upsert_session():
     payload = request.get_json(silent=True) or {}
     init_data = payload.get("init_data")
+    if not init_data:
+        init_data = _extract_init_data_from_location(payload.get("raw_location"))
     user = payload.get("user")
     if not user and init_data:
         user = extract_user_from_init_data(init_data)
@@ -422,17 +448,21 @@ def upsert_session():
                 db.claim_legacy_library(user.get("id"))
                 if _is_admin_user(int(user.get("id") or 0)):
                     db.ensure_admin_access(user.get("id"))
+            resolved_user_id = int((user or {}).get("id") or 0)
+            print(
+                f"[MiniApp] session fallback validated=False "
+                f"user={resolved_user_id} has_init_data={bool(init_data)}"
+            )
             response = make_response(
                 jsonify(
                     {
                         "ok": True,
                         "warning": "Telegram initData validation skipped.",
-                        "telegram_user_id": int((user or {}).get("id") or 0),
+                        "telegram_user_id": resolved_user_id,
                         "user": user,
                     }
                 )
             )
-            resolved_user_id = int((user or {}).get("id") or 0)
             if resolved_user_id > 0:
                 response.set_cookie(
                     "mini_app_user_id",
@@ -450,16 +480,20 @@ def upsert_session():
         if _is_admin_user(int(user.get("id") or 0)):
             db.ensure_admin_access(user.get("id"))
 
+    resolved_user_id = int((user or {}).get("id") or 0)
+    print(
+        f"[MiniApp] session resolved user={resolved_user_id} "
+        f"has_init_data={bool(init_data)}"
+    )
     response = make_response(
         jsonify(
             {
                 "ok": True,
-                "telegram_user_id": int((user or {}).get("id") or 0),
+                "telegram_user_id": resolved_user_id,
                 "user": user,
             }
         )
     )
-    resolved_user_id = int((user or {}).get("id") or 0)
     if resolved_user_id > 0:
         response.set_cookie(
             "mini_app_user_id",

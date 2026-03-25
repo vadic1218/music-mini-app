@@ -41,6 +41,47 @@ function $(selector) {
   return document.querySelector(selector);
 }
 
+function extractInitDataCandidate(raw) {
+  try {
+    if (!raw) return "";
+    const normalized = raw.startsWith("?") || raw.startsWith("#") ? raw.slice(1) : raw;
+    if (!normalized) return "";
+    const params = new URLSearchParams(normalized);
+    return (
+      params.get("tgWebAppData") ||
+      params.get("init_data") ||
+      (params.has("user") && params.has("hash") ? normalized : "")
+    );
+  } catch (_) {
+    return "";
+  }
+}
+
+function getTelegramInitData() {
+  const candidates = [
+    window.Telegram?.WebApp?.initData || "",
+    extractInitDataCandidate(window.location.search || ""),
+    extractInitDataCandidate(window.location.hash || ""),
+  ];
+  for (const candidate of candidates) {
+    if (candidate) return candidate;
+  }
+  return "";
+}
+
+function parseTelegramUserFromInitData(initData) {
+  try {
+    if (!initData) return null;
+    const params = new URLSearchParams(initData);
+    const rawUser = params.get("user");
+    if (!rawUser) return null;
+    const user = JSON.parse(rawUser);
+    return user && typeof user === "object" ? user : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 function currentUserId() {
   const value = Number(
     state.telegramUserId || state.telegramUser?.id || localStorage.getItem(STORAGE_KEYS.userId) || 0
@@ -876,7 +917,9 @@ async function bootstrap() {
     tg.ready();
     tg.expand();
     tg.enableClosingConfirmation?.();
-    state.telegramUser = tg.initDataUnsafe?.user || null;
+    const initData = getTelegramInitData();
+    const hashUser = parseTelegramUserFromInitData(initData);
+    state.telegramUser = tg.initDataUnsafe?.user || hashUser || null;
     if (state.telegramUser?.id) {
       state.telegramUserId = Number(state.telegramUser.id) || 0;
       localStorage.setItem(STORAGE_KEYS.userId, String(state.telegramUserId));
@@ -885,8 +928,9 @@ async function bootstrap() {
       const sessionPayload = await request("/api/session", {
         method: "POST",
         body: JSON.stringify({
-          init_data: tg.initData || null,
+          init_data: initData || null,
           user: state.telegramUser,
+          raw_location: window.location.href,
         }),
       });
       const resolvedUserId = Number(sessionPayload.telegram_user_id || sessionPayload.user?.id || 0);
@@ -901,7 +945,7 @@ async function bootstrap() {
       console.warn(error);
     }
     if ($("#user-greeting")) {
-      $("#user-greeting").textContent = `??????, ${(state.telegramUser && state.telegramUser.first_name) || "????"}`;
+      $("#user-greeting").textContent = `\u041f\u0440\u0438\u0432\u0435\u0442, ${(state.telegramUser && state.telegramUser.first_name) || "\u0434\u0440\u0443\u0433"}`;
     }
   }
 
