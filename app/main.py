@@ -132,7 +132,9 @@ def _extract_telegram_user_id(payload: dict | None = None) -> int:
     ]
     for candidate in candidates:
         try:
-            return int(candidate or 0)
+            value = int(candidate or 0)
+            if value > 0:
+                return value
         except (TypeError, ValueError):
             continue
     return 0
