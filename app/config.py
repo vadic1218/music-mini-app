@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -31,16 +32,8 @@ load_dotenv(BASE_DIR / ".env")
 
 
 def _parse_admin_ids(raw_value: str) -> list[int]:
-    admin_ids: list[int] = []
-    for chunk in (raw_value or "").split(","):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        try:
-            admin_ids.append(int(chunk))
-        except ValueError:
-            continue
-    return admin_ids
+    values = re.findall(r"\d+", raw_value or "")
+    return [int(value) for value in values]
 
 requested_data_dir = Path(os.getenv("DATA_DIR", str(BASE_DIR / "data"))).resolve()
 requested_database_path = Path(os.getenv("DATABASE_PATH", str(requested_data_dir / "mini_app.db"))).resolve()

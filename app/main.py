@@ -361,6 +361,16 @@ def health():
 @app.get("/api/access/status")
 def api_access_status():
     telegram_user_id = _extract_telegram_user_id()
+    try:
+        query_user_id = int(request.args.get("telegram_user_id") or 0)
+    except (TypeError, ValueError):
+        query_user_id = 0
+    try:
+        cookie_user_id = int(request.cookies.get("mini_app_user_id") or 0)
+    except (TypeError, ValueError):
+        cookie_user_id = 0
+    if telegram_user_id <= 0:
+        telegram_user_id = query_user_id or cookie_user_id
     status = _get_effective_access_status(telegram_user_id)
     print(
         f"[MiniApp] access status user={telegram_user_id} "
