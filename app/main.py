@@ -7,7 +7,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, make_response, request, send_from_directory
 
 from app.config import (
     APP_BASE_URL,
@@ -25,7 +25,7 @@ from app.database import db
 from app.services.lyrics_service import get_lyrics
 from app.services.playback_service_v2 import resolve_stream_url
 from app.services.search_service_v2 import get_yandex_liked_tracks, get_yandex_playlist_tracks, search_tracks
-from app.services.telegram_auth import validate_init_data
+from app.services.telegram_auth import extract_user_from_init_data, validate_init_data
 
 
 app = Flask(
@@ -120,6 +120,7 @@ def _extract_telegram_user_id(payload: dict | None = None) -> int:
         payload.get("user_id"),
         request.args.get("telegram_user_id"),
         request.args.get("user_id"),
+        request.cookies.get("mini_app_user_id"),
     ]
     for candidate in candidates:
         try:
@@ -385,6 +386,8 @@ def upsert_session():
     payload = request.get_json(silent=True) or {}
     init_data = payload.get("init_data")
     user = payload.get("user")
+    if not user and init_data:
+        user = extract_user_from_init_data(init_data)
 
     if init_data and TELEGRAM_BOT_TOKEN:
         if not validate_init_data(init_data, TELEGRAM_BOT_TOKEN):
@@ -394,7 +397,29 @@ def upsert_session():
             if user:
                 db.upsert_user(user)
                 db.claim_legacy_library(user.get("id"))
-            return jsonify({"ok": True, "warning": "Telegram initData validation skipped."})
+                if _is_admin_user(int(user.get("id") or 0)):
+                    db.ensure_admin_access(user.get("id"))
+            response = make_response(
+                jsonify(
+                    {
+                        "ok": True,
+                        "warning": "Telegram initData validation skipped.",
+                        "telegram_user_id": int((user or {}).get("id") or 0),
+                        "user": user,
+                    }
+                )
+            )
+            resolved_user_id = int((user or {}).get("id") or 0)
+            if resolved_user_id > 0:
+                response.set_cookie(
+                    "mini_app_user_id",
+                    str(resolved_user_id),
+                    max_age=60 * 60 * 24 * 30,
+                    secure=True,
+                    httponly=False,
+                    samesite="Lax",
+                )
+            return response
 
     if user:
         db.upsert_user(user)
@@ -402,7 +427,26 @@ def upsert_session():
         if _is_admin_user(int(user.get("id") or 0)):
             db.ensure_admin_access(user.get("id"))
 
-    return jsonify({"ok": True})
+    response = make_response(
+        jsonify(
+            {
+                "ok": True,
+                "telegram_user_id": int((user or {}).get("id") or 0),
+                "user": user,
+            }
+        )
+    )
+    resolved_user_id = int((user or {}).get("id") or 0)
+    if resolved_user_id > 0:
+        response.set_cookie(
+            "mini_app_user_id",
+            str(resolved_user_id),
+            max_age=60 * 60 * 24 * 30,
+            secure=True,
+            httponly=False,
+            samesite="Lax",
+        )
+    return response
 
 
 @app.get("/api/search")

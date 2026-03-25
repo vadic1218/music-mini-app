@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 from urllib.parse import parse_qsl
 
 
@@ -22,3 +23,24 @@ def validate_init_data(init_data: str, bot_token: str) -> bool:
         hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(calculated_hash, received_hash)
+
+
+def extract_user_from_init_data(init_data: str) -> dict | None:
+    if not init_data:
+        return None
+
+    try:
+        parsed = dict(parse_qsl(init_data, strict_parsing=True))
+    except ValueError:
+        return None
+
+    raw_user = parsed.get("user")
+    if not raw_user:
+        return None
+
+    try:
+        user = json.loads(raw_user)
+    except json.JSONDecodeError:
+        return None
+
+    return user if isinstance(user, dict) else None
