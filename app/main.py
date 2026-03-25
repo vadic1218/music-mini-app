@@ -3,6 +3,7 @@
 import json
 import os
 import re
+from urllib.parse import parse_qs
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from pathlib import Path
@@ -115,11 +116,18 @@ def _require_access_response(telegram_user_id: int):
 
 def _extract_telegram_user_id(payload: dict | None = None) -> int:
     payload = payload or {}
+    raw_query = {}
+    try:
+        raw_query = parse_qs((request.query_string or b"").decode("utf-8", errors="ignore"))
+    except Exception:
+        raw_query = {}
     candidates = [
         payload.get("telegram_user_id"),
         payload.get("user_id"),
         request.args.get("telegram_user_id"),
         request.args.get("user_id"),
+        (raw_query.get("telegram_user_id") or [None])[0],
+        (raw_query.get("user_id") or [None])[0],
         request.cookies.get("mini_app_user_id"),
     ]
     for candidate in candidates:
@@ -354,7 +362,10 @@ def api_access_status():
     status = _get_effective_access_status(telegram_user_id)
     print(
         f"[MiniApp] access status user={telegram_user_id} "
-        f"admins={sorted(_runtime_admin_ids())} status={status}"
+        f"admins={sorted(_runtime_admin_ids())} "
+        f"query={request.query_string.decode('utf-8', errors='ignore')} "
+        f"cookie={request.cookies.get('mini_app_user_id')} "
+        f"status={status}"
     )
     return jsonify({"ok": True, "status": status})
 

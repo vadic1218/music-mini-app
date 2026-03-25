@@ -139,6 +139,10 @@ class Database:
                     """
                 )
                 if table_exists:
+                    if "source_meta" not in columns:
+                        conn.execute("ALTER TABLE library_tracks ADD COLUMN source_meta TEXT")
+                    if "download_requested_at" not in columns:
+                        conn.execute("ALTER TABLE library_tracks ADD COLUMN download_requested_at TEXT")
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO library_tracks_v2 (
