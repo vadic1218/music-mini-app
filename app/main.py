@@ -2,6 +2,8 @@
 
 import json
 import os
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -9,6 +11,8 @@ from flask import Flask, jsonify, request, send_from_directory
 from app.config import (
     APP_BASE_URL,
     APP_NAME,
+    BOT_API_BASE_URL,
+    MINI_APP_SHARED_SECRET,
     DATA_DIR,
     DATABASE_PATH,
     STATIC_DIR,
@@ -32,13 +36,53 @@ app.json.ensure_ascii = False
 db.init()
 
 
+def _call_bot_bridge(path: str, *, method: str = "GET", payload: dict | None = None) -> dict | None:
+    if not BOT_API_BASE_URL or not MINI_APP_SHARED_SECRET:
+        return None
+    url = f"{BOT_API_BASE_URL}{path}"
+    body = None
+    headers = {
+        "X-Mini-App-Secret": MINI_APP_SHARED_SECRET,
+        "Accept": "application/json",
+    }
+    if payload is not None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    request_obj = Request(url, data=body, headers=headers, method=method.upper())
+    try:
+        with urlopen(request_obj, timeout=10) as response:
+            raw = response.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except HTTPError as error:
+        try:
+            raw = error.read().decode("utf-8")
+            return json.loads(raw) if raw else None
+        except Exception:
+            return None
+    except (URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _get_effective_access_status(telegram_user_id: int) -> dict:
+    if telegram_user_id <= 0:
+        return {"access_type": "free", "source": "none", "promo_code": None, "expires_at": None}
+    bridge_payload = _call_bot_bridge(
+        f"/internal/access/status?telegram_user_id={telegram_user_id}",
+        method="GET",
+    )
+    if bridge_payload and bridge_payload.get("status"):
+        return bridge_payload["status"]
+    return db.get_access_status(telegram_user_id)
+
+
 def _has_access(telegram_user_id: int) -> bool:
-    status = db.get_access_status(telegram_user_id)
+    status = _get_effective_access_status(telegram_user_id)
     return status.get("access_type") in {"premium", "admin"}
 
 
 def _require_access_response(telegram_user_id: int):
-    status = db.get_access_status(telegram_user_id)
+    status = _get_effective_access_status(telegram_user_id)
     return jsonify(
         {
             "detail": "Для использования Mini App нужен промокод или активная подписка.",
@@ -284,7 +328,7 @@ def health():
 @app.get("/api/access/status")
 def api_access_status():
     telegram_user_id = _extract_telegram_user_id()
-    return jsonify({"ok": True, "status": db.get_access_status(telegram_user_id)})
+    return jsonify({"ok": True, "status": _get_effective_access_status(telegram_user_id)})
 
 
 @app.post("/api/access/promo")
@@ -294,6 +338,15 @@ def api_activate_promo():
     code = (payload.get("code") or "").strip()
     if not code:
         return jsonify({"detail": "Введите промокод."}), 400
+    bridge_payload = _call_bot_bridge(
+        "/internal/access/promo",
+        method="POST",
+        payload={"telegram_user_id": telegram_user_id, "code": code},
+    )
+    if bridge_payload and "ok" in bridge_payload:
+        status = bridge_payload.get("status") or _get_effective_access_status(telegram_user_id)
+        bridge_payload["status"] = status
+        return (jsonify(bridge_payload), 200) if bridge_payload.get("ok") else (jsonify(bridge_payload), 400)
     result = db.activate_promo_code(telegram_user_id, code)
     if not result.get("ok"):
         return jsonify(result), 400

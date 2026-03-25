@@ -62,5 +62,7 @@ YANDEX_MUSIC_TOKEN = os.getenv("YANDEX_MUSIC_TOKEN", "").strip()
 BOT_DATABASE_PATH = Path(
     os.getenv("BOT_DATABASE_PATH", str((DATA_DIR / "music_bot.db").resolve()))
 ).resolve()
+BOT_API_BASE_URL = os.getenv("BOT_API_BASE_URL", "").rstrip("/")
+MINI_APP_SHARED_SECRET = os.getenv("MINI_APP_SHARED_SECRET", "").strip()
 SEARCH_RESULTS_PER_SOURCE = max(5, int(os.getenv("SEARCH_RESULTS_PER_SOURCE", "20")))
 LYRICS_RESULTS_LIMIT = max(5, int(os.getenv("LYRICS_RESULTS_LIMIT", "10")))

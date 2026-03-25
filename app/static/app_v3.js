@@ -667,7 +667,7 @@ function renderAccessStatus() {
   if (!node) return;
   const status = state.accessStatus || { access_type: "free", source: "none", promo_code: null, expires_at: null };
   if (status.access_type === "admin") {
-    node.textContent = "Администраторский доступ активен без ограничений.";
+    node.textContent = "Права администратора.";
     return;
   }
   if (status.access_type === "premium") {
