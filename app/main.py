@@ -32,6 +32,21 @@ app.json.ensure_ascii = False
 db.init()
 
 
+def _has_access(telegram_user_id: int) -> bool:
+    status = db.get_access_status(telegram_user_id)
+    return status.get("access_type") in {"premium", "admin"}
+
+
+def _require_access_response(telegram_user_id: int):
+    status = db.get_access_status(telegram_user_id)
+    return jsonify(
+        {
+            "detail": "Для использования Mini App нужен промокод или активная подписка.",
+            "status": status,
+        }
+    ), 403
+
+
 def _extract_telegram_user_id(payload: dict | None = None) -> int:
     payload = payload or {}
     candidates = [
@@ -104,6 +119,28 @@ def _read_library_cache(telegram_user_id: int) -> list[dict]:
         return []
 
 
+def _merge_track_lists(*collections: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for collection in collections:
+        for track in collection or []:
+            key = (str(track.get("source") or ""), str(track.get("source_track_id") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(track)
+    return merged
+
+
+def _persist_library_snapshot(telegram_user_id: int, tracks: list[dict]) -> None:
+    if telegram_user_id <= 0:
+        return
+    merged_tracks = _merge_track_lists(tracks)
+    for track in merged_tracks:
+        db.save_track(track, bucket="library", telegram_user_id=telegram_user_id)
+    _write_library_cache(telegram_user_id, merged_tracks)
+
+
 def _seed_library_from_liked_if_empty(telegram_user_id: int) -> int:
     library_tracks = db.list_tracks(bucket="library", limit=1, telegram_user_id=telegram_user_id)
     if library_tracks:
@@ -113,8 +150,7 @@ def _seed_library_from_liked_if_empty(telegram_user_id: int) -> int:
     if not liked_tracks:
         return 0
 
-    for track in liked_tracks:
-        db.save_track(track, bucket="library", telegram_user_id=telegram_user_id)
+    _persist_library_snapshot(telegram_user_id, liked_tracks)
     return len(liked_tracks)
 
 
@@ -166,6 +202,8 @@ def _library_tracks_with_fallback(
             if len(filtered_library_tracks) >= limit:
                 break
         if filtered_library_tracks:
+            if not query and not downloaded_only:
+                _persist_library_snapshot(telegram_user_id, filtered_library_tracks)
             return filtered_library_tracks
 
     cached_tracks = _read_liked_cache(telegram_user_id)
@@ -191,16 +229,15 @@ def _library_tracks_with_fallback(
             if len(filtered_tracks) >= limit:
                 break
         if filtered_tracks:
-            _write_library_cache(telegram_user_id, filtered_tracks)
+            _persist_library_snapshot(telegram_user_id, filtered_tracks)
             return filtered_tracks
 
     live_liked_tracks = get_yandex_liked_tracks(limit=max(limit, 2000))
     if live_liked_tracks:
         for track in live_liked_tracks:
             db.save_track(track, bucket="liked", telegram_user_id=telegram_user_id)
-            db.save_track(track, bucket="library", telegram_user_id=telegram_user_id)
+        _persist_library_snapshot(telegram_user_id, live_liked_tracks)
         _write_liked_cache(telegram_user_id, live_liked_tracks)
-        _write_library_cache(telegram_user_id, live_liked_tracks[:limit])
         return live_liked_tracks[:limit]
 
     return tracks
@@ -288,6 +325,9 @@ def upsert_session():
 
 @app.get("/api/search")
 def api_search():
+    telegram_user_id = _extract_telegram_user_id()
+    if not _has_access(telegram_user_id):
+        return _require_access_response(telegram_user_id)
     query = (request.args.get("q") or "").strip()
     source = (request.args.get("source") or "all").strip()
     limit = int(request.args.get("limit") or 20)
@@ -300,6 +340,9 @@ def api_search():
 
 @app.get("/api/lyrics")
 def api_lyrics():
+    telegram_user_id = _extract_telegram_user_id()
+    if not _has_access(telegram_user_id):
+        return _require_access_response(telegram_user_id)
     query = (request.args.get("q") or "").strip()
     source = (request.args.get("source") or "auto").strip()
     if not query:
@@ -315,6 +358,8 @@ def api_lyrics():
 @app.get("/api/library")
 def api_library():
     telegram_user_id = _extract_telegram_user_id()
+    if not _has_access(telegram_user_id):
+        return _require_access_response(telegram_user_id)
     bucket = (request.args.get("bucket") or "library").strip()
     query = (request.args.get("query") or "").strip()
     limit = int(request.args.get("limit") or 2000)
@@ -357,15 +402,20 @@ def api_library():
 def api_save_track():
     payload = request.get_json(silent=True) or {}
     telegram_user_id = _extract_telegram_user_id(payload)
+    if not _has_access(telegram_user_id):
+        return _require_access_response(telegram_user_id)
     bucket = payload.get("bucket", "library")
     required_fields = ["source", "source_track_id", "title", "artists"]
     if any(not payload.get(field) for field in required_fields):
         return jsonify({"detail": "Недостаточно данных для сохранения трека."}), 400
 
-    db.save_track(payload, bucket=bucket, telegram_user_id=telegram_user_id)
+    normalized_track = {**payload, "bucket": "library"}
+    db.save_track(normalized_track, bucket=bucket, telegram_user_id=telegram_user_id)
     if bucket == "library":
+        existing_snapshot = _read_library_cache(telegram_user_id)
+        merged_tracks = _merge_track_lists([normalized_track], existing_snapshot)
+        _persist_library_snapshot(telegram_user_id, merged_tracks)
         refreshed_tracks = _library_tracks_with_fallback(telegram_user_id, limit=2000)
-        _write_library_cache(telegram_user_id, refreshed_tracks)
         print(
             f"[MiniApp] saved library track user={telegram_user_id} "
             f"source={payload.get('source')} track_id={payload.get('source_track_id')} "
@@ -379,6 +429,8 @@ def api_save_track():
 def api_mark_downloaded():
     payload = request.get_json(silent=True) or {}
     telegram_user_id = _extract_telegram_user_id(payload)
+    if not _has_access(telegram_user_id):
+        return _require_access_response(telegram_user_id)
     source = payload.get("source")
     source_track_id = payload.get("source_track_id")
     bucket = payload.get("bucket", "library")
@@ -392,6 +444,9 @@ def api_mark_downloaded():
 @app.post("/api/playback-url")
 def api_playback_url():
     track = request.get_json(silent=True) or {}
+    telegram_user_id = _extract_telegram_user_id(track)
+    if not _has_access(telegram_user_id):
+        return _require_access_response(telegram_user_id)
     required_fields = ["source", "source_track_id"]
     if any(not track.get(field) for field in required_fields):
         return jsonify({"detail": "Недостаточно данных для воспроизведения."}), 400
@@ -406,6 +461,9 @@ def api_playback_url():
 @app.post("/api/download-url")
 def api_download_url():
     track = request.get_json(silent=True) or {}
+    telegram_user_id = _extract_telegram_user_id(track)
+    if not _has_access(telegram_user_id):
+        return _require_access_response(telegram_user_id)
     required_fields = ["source", "source_track_id"]
     if any(not track.get(field) for field in required_fields):
         return jsonify({"detail": "Недостаточно данных для скачивания."}), 400
@@ -424,6 +482,8 @@ def api_download_url():
 def api_sync_liked():
     payload = request.get_json(silent=True) or {}
     telegram_user_id = _extract_telegram_user_id(payload)
+    if not _has_access(telegram_user_id):
+        return _require_access_response(telegram_user_id)
     tracks = get_yandex_liked_tracks()
     if not tracks:
         return jsonify(
@@ -437,6 +497,7 @@ def api_sync_liked():
     result = db.sync_bucket(tracks, bucket="liked", telegram_user_id=telegram_user_id)
     _write_liked_cache(telegram_user_id, tracks)
     library_new_tracks: list[dict] = []
+    ordered_tracks: list[dict] = []
     for index, track in enumerate(tracks):
         track = {
             **track,
@@ -446,6 +507,7 @@ def api_sync_liked():
                 "synced_from": "liked",
             },
         }
+        ordered_tracks.append(track)
         existed = db.has_track(
             track.get("source"),
             track.get("source_track_id"),
@@ -456,9 +518,10 @@ def api_sync_liked():
         if not existed:
             library_new_tracks.append(track)
 
+    _persist_library_snapshot(telegram_user_id, ordered_tracks)
     seeded_count = _seed_library_from_liked_if_empty(telegram_user_id)
     library_tracks = _library_tracks_with_fallback(telegram_user_id, limit=2000)
-    _write_library_cache(telegram_user_id, library_tracks)
+    _persist_library_snapshot(telegram_user_id, library_tracks or ordered_tracks)
     print(
         f"[MiniApp] liked sync user={telegram_user_id} "
         f"liked_total={len(tracks)} library_total={len(library_tracks)} "
@@ -474,7 +537,7 @@ def api_sync_liked():
                 else f"Синхронизация лайков завершена. Библиотека восстановлена: {seeded_count} треков."
             ),
             "result": result,
-            "tracks": library_tracks or tracks[:2000],
+            "tracks": library_tracks or ordered_tracks[:2000],
             "library_new_tracks": library_new_tracks,
         }
     )
@@ -484,6 +547,8 @@ def api_sync_liked():
 def api_import_yandex_playlist():
     payload = request.get_json(silent=True) or {}
     telegram_user_id = _extract_telegram_user_id(payload)
+    if not _has_access(telegram_user_id):
+        return _require_access_response(telegram_user_id)
     playlist_url = (payload.get("url") or "").strip()
     if not playlist_url:
         return jsonify({"detail": "Нужна ссылка на плейлист Яндекс.Музыки."}), 400
@@ -508,7 +573,7 @@ def api_import_yandex_playlist():
             imported += 1
 
     library_tracks = _library_tracks_with_fallback(telegram_user_id, limit=2000)
-    _write_library_cache(telegram_user_id, library_tracks)
+    _persist_library_snapshot(telegram_user_id, library_tracks)
 
     return jsonify(
         {

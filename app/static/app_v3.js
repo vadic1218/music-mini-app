@@ -25,6 +25,17 @@ const STORAGE_KEYS = {
   downloadsSnapshot: "ksb-mini-app-downloads-v4",
 };
 
+function hasAccess() {
+  const accessType = state.accessStatus?.access_type;
+  return accessType === "premium" || accessType === "admin";
+}
+
+function ensureAccess() {
+  if (hasAccess()) return true;
+  switchTab("status");
+  throw new Error("Для использования Mini App нужен промокод или активная подписка.");
+}
+
 function $(selector) {
   return document.querySelector(selector);
 }
@@ -227,6 +238,7 @@ function renderTrackMeta(track) {
 }
 
 async function requestPlaybackUrl(track) {
+  ensureAccess();
   const key = trackKey(track);
   if (state.playbackCache[key]) {
     return await state.playbackCache[key];
@@ -234,7 +246,7 @@ async function requestPlaybackUrl(track) {
 
   const pending = request("/api/playback-url", {
     method: "POST",
-    body: JSON.stringify(track),
+    body: JSON.stringify({ ...track, telegram_user_id: ensureUserId() }),
   })
     .then((payload) => payload.stream_url)
     .catch((error) => {
@@ -247,12 +259,13 @@ async function requestPlaybackUrl(track) {
 }
 
 function prefetchPlaybackUrls(tracks) {
+  if (!hasAccess()) return;
   tracks.slice(0, 12).forEach((track) => {
     const key = trackKey(track);
     if (state.playbackCache[key]) return;
     state.playbackCache[key] = request("/api/playback-url", {
       method: "POST",
-      body: JSON.stringify(track),
+      body: JSON.stringify({ ...track, telegram_user_id: currentUserId() }),
     })
       .then((payload) => payload.stream_url)
       .catch(() => {
@@ -263,9 +276,10 @@ function prefetchPlaybackUrls(tracks) {
 }
 
 async function fetchDownloadPayload(track) {
+  ensureAccess();
   return request("/api/download-url", {
     method: "POST",
-    body: JSON.stringify(track),
+    body: JSON.stringify({ ...track, telegram_user_id: ensureUserId() }),
   });
 }
 
@@ -296,6 +310,41 @@ async function triggerTrackDownload(track, bucket = "library") {
   anchor.click();
   anchor.remove();
   await markTrackDownloaded(track, bucket);
+}
+
+function updateMediaSession() {
+  if (!("mediaSession" in navigator)) return;
+  const audio = $("#audio-player");
+  const track = state.currentTrack;
+  navigator.mediaSession.playbackState = track && !audio.paused ? "playing" : "paused";
+  if (!track) {
+    navigator.mediaSession.metadata = null;
+    return;
+  }
+  const artwork = track.cover_url
+    ? [
+        { src: track.cover_url, sizes: "96x96", type: "image/jpeg" },
+        { src: track.cover_url, sizes: "192x192", type: "image/jpeg" },
+        { src: track.cover_url, sizes: "512x512", type: "image/jpeg" },
+      ]
+    : [];
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: track.title || "Без названия",
+    artist: track.artists || "Неизвестный артист",
+    album: track.album || "",
+    artwork,
+  });
+  if (navigator.mediaSession.setPositionState && audio.duration) {
+    try {
+      navigator.mediaSession.setPositionState({
+        duration: audio.duration || 0,
+        playbackRate: audio.playbackRate || 1,
+        position: audio.currentTime || 0,
+      });
+    } catch (error) {
+      console.warn(error);
+    }
+  }
 }
 
 function buildQueueFromCollection(track, collectionTracks, { wrap = false } = {}) {
@@ -477,6 +526,7 @@ function updatePlayerUi() {
   if ($("#player-dock-toggle")) $("#player-dock-toggle").textContent = isPlaying ? "⏸" : "▶";
 
   updateModeButtons();
+  updateMediaSession();
   persistPlayerState();
 }
 
@@ -549,9 +599,9 @@ function createTrackCard(track, { saveButton = false, openLyricsButton = false, 
     saveButtonNode.type = "button";
     saveButtonNode.className = "ghost-button";
     saveButtonNode.textContent = alreadySaved ? "Уже в библиотеке" : "В библиотеку";
-    saveButtonNode.disabled = alreadySaved;
     saveButtonNode.addEventListener("click", async () => {
       try {
+        ensureAccess();
         const payload = await request("/api/library/tracks", {
           method: "POST",
           body: JSON.stringify({ ...track, bucket: "library", telegram_user_id: ensureUserId() }),
@@ -573,7 +623,6 @@ function createTrackCard(track, { saveButton = false, openLyricsButton = false, 
         renderLibraryResults("");
         await loadLibrary("");
         saveButtonNode.textContent = "Уже в библиотеке";
-        saveButtonNode.disabled = true;
         setStatusText("Трек добавлен в библиотеку.", "library");
       } catch (error) {
         setStatusText(error.message, "library");
@@ -658,6 +707,7 @@ async function activatePromo(event) {
 
 async function performSearch(event) {
   event.preventDefault();
+  ensureAccess();
   const query = $("#search-query").value.trim();
   if (!query) return;
   setStatusText("Ищу треки...");
@@ -675,6 +725,7 @@ async function performSearch(event) {
 
 async function performLyricsSearch(event) {
   event.preventDefault();
+  ensureAccess();
   const query = $("#lyrics-query").value.trim();
   if (!query) return;
   $("#lyrics-result").textContent = "Ищу текст...";
@@ -688,6 +739,7 @@ async function performLyricsSearch(event) {
 }
 
 async function loadLibrary(query = "") {
+  ensureAccess();
   const payload = await request(
     `/api/library?bucket=library&limit=2000&telegram_user_id=${encodeURIComponent(currentUserId())}&query=${encodeURIComponent((query || "").trim())}`
   );
@@ -713,6 +765,7 @@ async function loadLibrary(query = "") {
 }
 
 async function loadDownloads(query = "") {
+  ensureAccess();
   const payload = await request(
     `/api/library?bucket=library&downloaded_only=1&limit=2000&telegram_user_id=${encodeURIComponent(currentUserId())}&query=${encodeURIComponent((query || "").trim())}`
   );
@@ -743,6 +796,7 @@ function renderLibrarySyncStats(result) {
 }
 
 async function syncLibraryFromLiked() {
+  ensureAccess();
   setStatusText("Синхронизация библиотеки запущена...", "library-sync");
   const payload = await request("/api/liked/sync", {
     method: "POST",
@@ -773,6 +827,7 @@ async function syncLibraryFromLiked() {
 }
 
 async function downloadLibraryTracks() {
+  ensureAccess();
   const pendingTracks = state.libraryTracks.filter((track) => !isTrackDownloaded(track));
   if (!pendingTracks.length) {
     setStatusText("Все треки в библиотеке уже отмечены как скачанные.", "library-sync");
@@ -791,6 +846,7 @@ async function downloadLibraryTracks() {
 
 async function importPlaylistByUrl(event) {
   event.preventDefault();
+  ensureAccess();
   const url = $("#playlist-url").value.trim();
   if (!url) {
     setStatusText("Вставьте ссылку на плейлист Яндекс.Музыки.", "library-sync");
@@ -841,8 +897,14 @@ async function bootstrap() {
   restoreLibrarySnapshot();
   await loadHealth();
   await loadAccessStatus();
-  await loadLibrary("");
-  await loadDownloads("");
+  if (hasAccess()) {
+    await loadLibrary("");
+    await loadDownloads("");
+  } else {
+    switchTab("status");
+    setStatusText("Доступ к Mini App закрыт. Активируйте промокод или оформите подписку.", "library");
+    setStatusText("Сначала активируйте доступ, потом можно синхронизировать библиотеку.", "library-sync");
+  }
   renderQueue();
   updatePlayerUi();
 }
@@ -939,6 +1001,44 @@ document.addEventListener("DOMContentLoaded", () => {
     $("#audio-player").addEventListener("ended", () => {
       playNextTrack().catch((error) => setStatusText(error.message));
     });
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.setActionHandler("play", async () => {
+        const audio = $("#audio-player");
+        if (state.currentTrack) {
+          await audio.play();
+          updatePlayerUi();
+        }
+      });
+      navigator.mediaSession.setActionHandler("pause", () => {
+        const audio = $("#audio-player");
+        audio.pause();
+        updatePlayerUi();
+      });
+      navigator.mediaSession.setActionHandler("nexttrack", () => {
+        playNextTrack().catch((error) => setStatusText(error.message));
+      });
+      navigator.mediaSession.setActionHandler("previoustrack", () => {
+        playPreviousTrack();
+      });
+      navigator.mediaSession.setActionHandler("seekto", (details) => {
+        const audio = $("#audio-player");
+        if (typeof details.seekTime === "number") {
+          audio.currentTime = details.seekTime;
+          updatePlayerUi();
+        }
+      });
+      navigator.mediaSession.setActionHandler("seekbackward", () => {
+        const audio = $("#audio-player");
+        audio.currentTime = Math.max(0, (audio.currentTime || 0) - 10);
+        updatePlayerUi();
+      });
+      navigator.mediaSession.setActionHandler("seekforward", () => {
+        const audio = $("#audio-player");
+        const duration = Number.isFinite(audio.duration) ? audio.duration : (state.currentTrack?.duration_seconds || 0);
+        audio.currentTime = Math.min(duration || 0, (audio.currentTime || 0) + 10);
+        updatePlayerUi();
+      });
+    }
 
     bootstrap().catch((error) => showFatalError(error.message));
   } catch (error) {

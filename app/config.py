@@ -59,5 +59,8 @@ APP_BASE_URL = os.getenv("APP_BASE_URL", "").rstrip("/")
 TELEGRAM_BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_IDS = _parse_admin_ids(os.getenv("ADMIN_IDS", ""))
 YANDEX_MUSIC_TOKEN = os.getenv("YANDEX_MUSIC_TOKEN", "").strip()
+BOT_DATABASE_PATH = Path(
+    os.getenv("BOT_DATABASE_PATH", str((DATA_DIR / "music_bot.db").resolve()))
+).resolve()
 SEARCH_RESULTS_PER_SOURCE = max(5, int(os.getenv("SEARCH_RESULTS_PER_SOURCE", "20")))
 LYRICS_RESULTS_LIMIT = max(5, int(os.getenv("LYRICS_RESULTS_LIMIT", "10")))

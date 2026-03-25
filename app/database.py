@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
 
-from .config import ADMIN_IDS, DATABASE_PATH
+from .config import ADMIN_IDS, BOT_DATABASE_PATH, DATABASE_PATH
 
 DEFAULT_PROMO_CODES = [
     {
@@ -48,6 +48,7 @@ def utcnow() -> str:
 class Database:
     def __init__(self, path: Path):
         self.path = path
+        self.bot_db_path = BOT_DATABASE_PATH
         self._initialized = False
 
     @contextmanager
@@ -213,6 +214,64 @@ class Database:
             return int(telegram_user_id or 0)
         except (TypeError, ValueError):
             return 0
+
+    @contextmanager
+    def connect_bot_db(self):
+        if not self.bot_db_path or not Path(self.bot_db_path).exists():
+            yield None
+            return
+        connection = sqlite3.connect(self.bot_db_path)
+        connection.row_factory = sqlite3.Row
+        try:
+            yield connection
+            connection.commit()
+        finally:
+            connection.close()
+
+    def _ensure_bot_user(self, conn, telegram_user_id: int) -> None:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO users (
+                user_id, username, first_name, last_name, language_code, is_premium, last_seen, total_downloads
+            )
+            VALUES (?, NULL, NULL, NULL, NULL, 0, CURRENT_TIMESTAMP, 0)
+            """,
+            (telegram_user_id,),
+        )
+
+    def _get_bot_access_status(self, telegram_user_id: int) -> dict | None:
+        if telegram_user_id <= 0:
+            return None
+        if telegram_user_id in ADMIN_IDS:
+            return {
+                "access_type": "admin",
+                "source": "admin",
+                "promo_code": None,
+                "expires_at": None,
+            }
+        with self.connect_bot_db() as conn:
+            if conn is None:
+                return None
+            row = conn.execute(
+                """
+                SELECT subscription_type, expiry_date, is_promo, promo_code
+                FROM subscriptions
+                WHERE user_id = ?
+                  AND status = 'active'
+                  AND (expiry_date IS NULL OR expiry_date > CURRENT_TIMESTAMP)
+                ORDER BY start_date DESC
+                LIMIT 1
+                """,
+                (telegram_user_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "access_type": "premium",
+                "source": "promo" if row["is_promo"] else "subscription",
+                "promo_code": row["promo_code"],
+                "expires_at": row["expiry_date"],
+            }
 
     def upsert_user(self, user_payload: dict) -> None:
         if not user_payload or "id" not in user_payload:
@@ -588,13 +647,9 @@ class Database:
         normalized_user_id = self._normalize_user_id(telegram_user_id)
         if normalized_user_id <= 0:
             return {"access_type": "free", "source": "none", "promo_code": None, "expires_at": None}
-        if normalized_user_id in ADMIN_IDS:
-            return {
-                "access_type": "admin",
-                "source": "admin",
-                "promo_code": None,
-                "expires_at": None,
-            }
+        bot_status = self._get_bot_access_status(normalized_user_id)
+        if bot_status:
+            return bot_status
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -618,18 +673,19 @@ class Database:
                 "status": self.get_access_status(normalized_user_id),
             }
 
-        with self.connect() as conn:
-            existing_access = conn.execute(
-                "SELECT access_type, source, promo_code, expires_at FROM access_grants WHERE telegram_user_id = ?",
-                (normalized_user_id,),
-            ).fetchone()
-            if existing_access and existing_access["access_type"] == "premium":
-                return {
-                    "ok": False,
-                    "message": "У вас уже активирован доступ в Mini App.",
-                    "status": dict(existing_access),
-                }
+        current_status = self.get_access_status(normalized_user_id)
+        if current_status.get("access_type") in {"premium", "admin"}:
+            return {
+                "ok": False,
+                "message": "У вас уже активирован доступ.",
+                "status": current_status,
+            }
 
+        bot_result = self._activate_promo_code_in_bot_db(normalized_user_id, promo_code)
+        if bot_result.get("handled"):
+            return bot_result
+
+        with self.connect() as conn:
             promo = conn.execute(
                 """
                 SELECT code, subscription_type, max_uses, uses_count, expiry_date, is_active, description
@@ -679,6 +735,94 @@ class Database:
                 "message": "Промокод успешно активирован.",
                 "status": status,
             }
+
+    def _activate_promo_code_in_bot_db(self, telegram_user_id: int, promo_code: str) -> dict:
+        with self.connect_bot_db() as conn:
+            if conn is None:
+                return {"ok": False, "handled": False}
+
+            self._ensure_bot_user(conn, telegram_user_id)
+
+            used_any = conn.execute(
+                "SELECT COUNT(*) FROM promo_usage WHERE user_id = ?",
+                (telegram_user_id,),
+            ).fetchone()[0]
+            if used_any:
+                return {
+                    "ok": False,
+                    "handled": True,
+                    "message": "У пользователя уже был активирован промокод.",
+                    "status": self.get_access_status(telegram_user_id),
+                }
+
+            promo = conn.execute(
+                """
+                SELECT code, subscription_type, max_uses, uses_count, expiry_date, is_active
+                FROM promo_codes
+                WHERE code = ? COLLATE NOCASE
+                """,
+                (promo_code,),
+            ).fetchone()
+            if not promo:
+                return {"ok": False, "handled": False}
+            if not promo["is_active"]:
+                return {
+                    "ok": False,
+                    "handled": True,
+                    "message": "Промокод отключен.",
+                    "status": self.get_access_status(telegram_user_id),
+                }
+            if promo["max_uses"] > 0 and promo["uses_count"] >= promo["max_uses"]:
+                return {
+                    "ok": False,
+                    "handled": True,
+                    "message": "Промокод уже израсходован.",
+                    "status": self.get_access_status(telegram_user_id),
+                }
+
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            start_date = now.strftime("%Y-%m-%d %H:%M:%S")
+            expiry_date = None if promo["code"] == "V1_GAN13" else promo["expiry_date"]
+
+            conn.execute(
+                "UPDATE subscriptions SET status = 'expired' WHERE user_id = ? AND status = 'active'",
+                (telegram_user_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO subscriptions (
+                    user_id, subscription_type, status, start_date, expiry_date,
+                    is_promo, promo_code, payment_method, transaction_id
+                )
+                VALUES (?, ?, 'active', ?, ?, 1, ?, 'mini_app_promo', ?)
+                """,
+                (
+                    telegram_user_id,
+                    promo["subscription_type"],
+                    start_date,
+                    expiry_date,
+                    promo["code"],
+                    f"MINIAPP_{promo['code']}_{telegram_user_id}_{int(now.timestamp())}",
+                ),
+            )
+            conn.execute(
+                "UPDATE promo_codes SET uses_count = uses_count + 1 WHERE code = ?",
+                (promo["code"],),
+            )
+            conn.execute(
+                """
+                INSERT INTO promo_usage (user_id, promo_code, subscription_type)
+                VALUES (?, ?, ?)
+                """,
+                (telegram_user_id, promo["code"], promo["subscription_type"]),
+            )
+
+        return {
+            "ok": True,
+            "handled": True,
+            "message": "Промокод успешно активирован.",
+            "status": self.get_access_status(telegram_user_id),
+        }
 
 
 db = Database(DATABASE_PATH)
