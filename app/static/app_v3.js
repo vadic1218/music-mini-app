@@ -2,6 +2,7 @@ const state = {
   searchSource: "all",
   lyricsSource: "auto",
   telegramUser: null,
+  telegramUserId: 0,
   health: null,
   accessStatus: null,
   currentTrack: null,
@@ -42,7 +43,7 @@ function $(selector) {
 
 function currentUserId() {
   const value = Number(
-    state.telegramUser?.id || localStorage.getItem(STORAGE_KEYS.userId) || 0
+    state.telegramUserId || state.telegramUser?.id || localStorage.getItem(STORAGE_KEYS.userId) || 0
   );
   return Number.isFinite(value) ? value : 0;
 }
@@ -876,22 +877,34 @@ async function bootstrap() {
     tg.expand();
     tg.enableClosingConfirmation?.();
     state.telegramUser = tg.initDataUnsafe?.user || null;
-    if (state.telegramUser) {
-      localStorage.setItem(STORAGE_KEYS.userId, String(state.telegramUser.id));
-      $("#user-greeting").textContent = `Привет, ${state.telegramUser.first_name || "друг"}`;
-      try {
-        await request("/api/session", {
-          method: "POST",
-          body: JSON.stringify({
-            init_data: tg.initData || null,
-            user: state.telegramUser,
-          }),
-        });
-      } catch (error) {
-        console.warn(error);
+    if (state.telegramUser?.id) {
+      state.telegramUserId = Number(state.telegramUser.id) || 0;
+      localStorage.setItem(STORAGE_KEYS.userId, String(state.telegramUserId));
+    }
+    try {
+      const sessionPayload = await request("/api/session", {
+        method: "POST",
+        body: JSON.stringify({
+          init_data: tg.initData || null,
+          user: state.telegramUser,
+        }),
+      });
+      const resolvedUserId = Number(sessionPayload.telegram_user_id || sessionPayload.user?.id || 0);
+      if (resolvedUserId > 0) {
+        state.telegramUserId = resolvedUserId;
+        localStorage.setItem(STORAGE_KEYS.userId, String(resolvedUserId));
       }
+      if (!state.telegramUser && sessionPayload.user) {
+        state.telegramUser = sessionPayload.user;
+      }
+    } catch (error) {
+      console.warn(error);
+    }
+    if ($("#user-greeting")) {
+      $("#user-greeting").textContent = `??????, ${(state.telegramUser && state.telegramUser.first_name) || "????"}`;
     }
   }
+
 
   restorePlayerState();
   restoreLibrarySnapshot();
