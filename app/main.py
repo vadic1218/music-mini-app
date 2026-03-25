@@ -11,6 +11,7 @@ from flask import Flask, jsonify, request, send_from_directory
 from app.config import (
     APP_BASE_URL,
     APP_NAME,
+    ADMIN_IDS,
     BOT_API_BASE_URL,
     MINI_APP_SHARED_SECRET,
     DATA_DIR,
@@ -67,6 +68,14 @@ def _call_bot_bridge(path: str, *, method: str = "GET", payload: dict | None = N
 def _get_effective_access_status(telegram_user_id: int) -> dict:
     if telegram_user_id <= 0:
         return {"access_type": "free", "source": "none", "promo_code": None, "expires_at": None}
+    if telegram_user_id in ADMIN_IDS:
+        return {
+            "access_type": "admin",
+            "source": "admin",
+            "promo_code": None,
+            "expires_at": None,
+            "label": "Права администратора",
+        }
     bridge_payload = _call_bot_bridge(
         f"/internal/access/status?telegram_user_id={telegram_user_id}",
         method="GET",
