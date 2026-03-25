@@ -300,6 +300,28 @@ class Database:
                 ),
             )
 
+    def ensure_admin_access(self, telegram_user_id: int | str | None) -> None:
+        normalized_user_id = self._normalize_user_id(telegram_user_id)
+        if normalized_user_id <= 0:
+            return
+        now = utcnow()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO access_grants (
+                    telegram_user_id, access_type, source, promo_code, expires_at, updated_at
+                )
+                VALUES (?, 'admin', 'admin', NULL, NULL, ?)
+                ON CONFLICT(telegram_user_id) DO UPDATE SET
+                    access_type = 'admin',
+                    source = 'admin',
+                    promo_code = NULL,
+                    expires_at = NULL,
+                    updated_at = excluded.updated_at
+                """,
+                (normalized_user_id, now),
+            )
+
     def claim_legacy_library(self, telegram_user_id: int | str | None) -> int:
         normalized_user_id = self._normalize_user_id(telegram_user_id)
         if normalized_user_id <= 0:

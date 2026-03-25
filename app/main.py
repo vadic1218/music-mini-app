@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from pathlib import Path
@@ -37,6 +38,17 @@ app.json.ensure_ascii = False
 db.init()
 
 
+def _runtime_admin_ids() -> set[int]:
+    values = set(ADMIN_IDS)
+    raw_value = os.getenv("ADMIN_IDS", "")
+    values.update(int(value) for value in re.findall(r"\d+", raw_value or ""))
+    return {value for value in values if value > 0}
+
+
+def _is_admin_user(telegram_user_id: int) -> bool:
+    return telegram_user_id > 0 and telegram_user_id in _runtime_admin_ids()
+
+
 def _call_bot_bridge(path: str, *, method: str = "GET", payload: dict | None = None) -> dict | None:
     if not BOT_API_BASE_URL or not MINI_APP_SHARED_SECRET:
         return None
@@ -68,7 +80,8 @@ def _call_bot_bridge(path: str, *, method: str = "GET", payload: dict | None = N
 def _get_effective_access_status(telegram_user_id: int) -> dict:
     if telegram_user_id <= 0:
         return {"access_type": "free", "source": "none", "promo_code": None, "expires_at": None}
-    if telegram_user_id in ADMIN_IDS:
+    if _is_admin_user(telegram_user_id):
+        db.ensure_admin_access(telegram_user_id)
         return {
             "access_type": "admin",
             "source": "admin",
@@ -337,7 +350,12 @@ def health():
 @app.get("/api/access/status")
 def api_access_status():
     telegram_user_id = _extract_telegram_user_id()
-    return jsonify({"ok": True, "status": _get_effective_access_status(telegram_user_id)})
+    status = _get_effective_access_status(telegram_user_id)
+    print(
+        f"[MiniApp] access status user={telegram_user_id} "
+        f"admins={sorted(_runtime_admin_ids())} status={status}"
+    )
+    return jsonify({"ok": True, "status": status})
 
 
 @app.post("/api/access/promo")
@@ -381,6 +399,8 @@ def upsert_session():
     if user:
         db.upsert_user(user)
         db.claim_legacy_library(user.get("id"))
+        if _is_admin_user(int(user.get("id") or 0)):
+            db.ensure_admin_access(user.get("id"))
 
     return jsonify({"ok": True})
 
